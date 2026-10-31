@@ -43,7 +43,7 @@ test('prompt carries the plan, condensed older steps, element hints and todo fil
     const out = await response.json();
     assert.deepEqual(out.completed, ['2']);
     const prompt = mock.calls[0].messages[0].content[0].text;
-    assert.match(prompt, /PLAN \(check items off/);
+    assert.match(prompt, /PLAN \(only check an item off once a verified action finished it\)/);
     assert.match(prompt, /1\. \[x\] Open the menu/);
     assert.match(prompt, /EARLIER \(3 steps, condensed\)/);
     assert.match(prompt, /type FAILED: typed a query/);
@@ -132,4 +132,64 @@ test('invalid planning input, missing key and rate limits fail safely', async ()
   const limitedDb = { prepare() { return { bind() { return { async first() { return { count: 9999 }; } }; } }; } };
   const throttled = await worker.fetch(request(observation), { DB:limitedDb, OPENROUTER_API_KEY:'test-key' });
   assert.equal(throttled.status, 429);
+});
+
+test('a reply with several actions is returned as one batch', async () => {
+  const mock = scripted([{ actions: [
+    { type:'click', x:10, y:20, description:'Focus the title field' },
+    { type:'type', x:10, y:20, text:'Report', description:'Type the title' },
+    { type:'key', key:'Tab', description:'Move to the next field' }
+  ], completed:['1'] }]);
+  const steps = [{ type:'click', description:'Opened the document', ok:true, changed:true }];
+  const todos = [{ id:'1', title:'Write the title', done:false }];
+  try {
+    const response = await worker.fetch(request({ ...observation, steps, todos }), { DB:db, OPENROUTER_API_KEY:'test-key' });
+    const out = await response.json();
+    assert.equal(out.actions.length, 3);
+    assert.equal(out.action.type, 'click');
+    assert.deepEqual(out.completed, ['1']);
+    const prompt = mock.calls[0].messages[0].content[0].text;
+    assert.match(prompt, /"actions"/);
+    assert.match(prompt, /back to back/);
+  } finally { mock.restore(); }
+});
+
+test('done cannot be batched and the reply is corrected', async () => {
+  const mock = scripted([{ actions:[click(), { type:'done', summary:'Done.' }] }, { type:'scroll', direction:'down', description:'Reveal more' }]);
+  try {
+    const response = await worker.fetch(request(observation), { DB:db, OPENROUTER_API_KEY:'test-key' });
+    const out = await response.json();
+    assert.equal(out.action.type, 'scroll');
+    assert.equal(mock.calls.length, 2);
+    assert.match(mock.calls[1].messages[0].content[0].text, /cannot be batched/);
+  } finally { mock.restore(); }
+});
+
+test('a plan claim with no verified step behind it is corrected', async () => {
+  const mock = scripted([{ actions:[click()], completed:['1'] }, { actions:[click({ description:'Open the menu for real' })] }]);
+  const todos = [{ id:'1', title:'Open the menu', done:false }];
+  const steps = [{ type:'click', description:'Click somewhere useless', ok:false, changed:false, note:'no visible change' }];
+  try {
+    const response = await worker.fetch(request({ ...observation, steps, todos }), { DB:db, OPENROUTER_API_KEY:'test-key' });
+    const out = await response.json();
+    assert.deepEqual(out.completed, []);
+    assert.equal(mock.calls.length, 2);
+    assert.match(mock.calls[1].messages[0].content[0].text, /CORRECTION: you checked off 1/);
+    assert.match(mock.calls[0].messages[0].content[0].text, /FAILED \(no page change\): Click somewhere useless/);
+  } finally { mock.restore(); }
+});
+
+test('over-long batches and batched navigation are rejected', async () => {
+  const many = scripted([{ actions: Array.from({ length: 5 }, () => click()) }]);
+  try {
+    const response = await worker.fetch(request(observation), { DB:db, OPENROUTER_API_KEY:'test-key' });
+    assert.equal(response.status, 400);
+    assert.match((await response.json()).error, /At most 4/);
+  } finally { many.restore(); }
+  const nav = scripted([{ actions:[click(), { type:'navigate', url:'https://example.com', description:'Go' }] }]);
+  try {
+    const response = await worker.fetch(request(observation), { DB:db, OPENROUTER_API_KEY:'test-key' });
+    assert.equal(response.status, 400);
+    assert.match((await response.json()).error, /cannot be batched/);
+  } finally { nav.restore(); }
 });

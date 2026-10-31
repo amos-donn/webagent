@@ -1,6 +1,7 @@
 chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
 function permitted(url) { try { const u = new URL(url); return u.protocol === 'https:' || (u.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(u.hostname)); } catch { return false; } }
 async function debug(tabId, fn) { const target = { tabId }; await chrome.debugger.attach(target, '1.3'); try { return await fn(target); } finally { await chrome.debugger.detach(target).catch(() => {}); } }
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 // SPA routing, tracking parameters and trailing slashes change the URL without changing the page.
 function samePage(a, b) {
   if (a === b) return true;
@@ -141,27 +142,148 @@ function scalePoint(action, observedWidth, observedHeight, live) {
   if (Math.abs(scaleX - 1) > 0.02 || Math.abs(scaleY - 1) > 0.02) console.info(`Scaled click from ${observedWidth}x${observedHeight} to ${maxX + 1}x${maxY + 1}`);
   return { x, y };
 }
+// A cheap fingerprint of the page, used to prove an action actually did something.
+function pageSignature() {
+  const text = document.body ? (document.body.innerText || '') : '';
+  let hash = 0;
+  for (let i = 0; i < text.length; i += 7) hash = (hash * 31 + text.charCodeAt(i)) | 0;
+  const active = document.activeElement;
+  return `${location.href}|${text.length}|${hash}|${document.querySelectorAll('*').length}|${Math.round(scrollY)}|${active ? active.tagName : ''}`;
+}
+async function signature(tabId) {
+  try {
+    const [{ result }] = await chrome.scripting.executeScript({ target: { tabId }, func: pageSignature });
+    return typeof result === 'string' ? result : '';
+  } catch { return ''; }
+}
+// Wait for the page to react; a slow framework may need more than one tick.
+async function settle(tabId, before) {
+  let latest = before;
+  for (let attempt = 0; attempt < 6; attempt++) {
+    await sleep(200);
+    latest = await signature(tabId);
+    if (latest && before && latest !== before) return latest;
+  }
+  return latest;
+}
+// What currently has keyboard focus, including inside iframes (Google Docs and friends keep focus in a child frame).
+async function readEditable(tabId) {
+  try {
+    const frames = await chrome.scripting.executeScript({
+      target: { tabId }, allFrames: true, func: () => {
+        const el = document.activeElement;
+        if (!el || el === document.body) return { kind: 'none', value: null, password: false };
+        if (el.tagName === 'IFRAME' || el.tagName === 'FRAME') return { kind: 'frame', value: null, password: false };
+        const editable = el.isContentEditable || el.tagName === 'TEXTAREA' || (el.tagName === 'INPUT' && !['checkbox', 'radio', 'submit', 'button', 'file', 'range', 'color'].includes(el.type)) || el.getAttribute?.('role') === 'textbox';
+        if (!editable) return { kind: 'other', value: null, password: false };
+        const value = typeof el.value === 'string' ? el.value : (el.innerText || '');
+        return { kind: 'editable', value, password: el.type === 'password' };
+      }
+    });
+    const list = frames.map(frame => frame.result).filter(Boolean);
+    return list.find(item => item.password) || list.find(item => item.kind === 'editable') || list.find(item => item.kind === 'frame') || list[0] || { kind: 'none', value: null, password: false };
+  } catch { return { kind: 'none', value: null, password: false }; }
+}
+const KEY_MAP = { Enter: [13, 'Enter', '\r'], Escape: [27, 'Escape', 'Escape'], Tab: [9, 'Tab', '\t'], ArrowUp: [38, 'ArrowUp', ''], ArrowDown: [40, 'ArrowDown', ''], ArrowLeft: [37, 'ArrowLeft', ''], ArrowRight: [39, 'ArrowRight', ''], PageUp: [33, 'PageUp', ''], PageDown: [34, 'PageDown', ''], Home: [36, 'Home', ''], End: [35, 'End', ''], Backspace: [8, 'Backspace', ''] };
+async function pressKey(target, name) {
+  const entry = KEY_MAP[name];
+  if (!entry) throw new Error('Unsupported key.');
+  const [code, key, text] = entry;
+  await chrome.debugger.sendCommand(target, 'Input.dispatchKeyEvent', { type: 'keyDown', windowsVirtualKeyCode: code, key, ...(text ? { text } : {}) });
+  await chrome.debugger.sendCommand(target, 'Input.dispatchKeyEvent', { type: 'keyUp', windowsVirtualKeyCode: code, key });
+}
+// Canvas editors ignore paste-style inserts, so every character is delivered as a real key event instead.
+async function typeKeys(target, text) {
+  for (const char of text.slice(0, 5000)) {
+    if (char === '\n') {
+      await chrome.debugger.sendCommand(target, 'Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13, text: '\r', unmodifiedText: '\r' });
+      await chrome.debugger.sendCommand(target, 'Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
+      continue;
+    }
+    const virtual = char.toUpperCase().charCodeAt(0);
+    await chrome.debugger.sendCommand(target, 'Input.dispatchKeyEvent', { type: 'keyDown', key: char, text: char, unmodifiedText: char, windowsVirtualKeyCode: virtual });
+    await chrome.debugger.sendCommand(target, 'Input.dispatchKeyEvent', { type: 'keyUp', key: char, windowsVirtualKeyCode: virtual });
+  }
+}
+async function clickPoint(target, point) {
+  await chrome.debugger.sendCommand(target, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x: point.x, y: point.y, button: 'none' });
+  await chrome.debugger.sendCommand(target, 'Input.dispatchMouseEvent', { type: 'mousePressed', x: point.x, y: point.y, button: 'left', clickCount: 1 });
+  await chrome.debugger.sendCommand(target, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x: point.x, y: point.y, button: 'left', clickCount: 1 });
+}
+// Second chance for controls that ignore synthetic mouse events: fire the click inside the page itself.
+async function clickElement(tabId, point) {
+  try {
+    const [{ result }] = await chrome.scripting.executeScript({
+      target: { tabId }, func: (x, y) => {
+        const el = document.elementFromPoint(x, y);
+        if (!el) return false;
+        el.scrollIntoView?.({ block: 'nearest' });
+        el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
+        el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
+        el.click?.();
+        return true;
+      }, args: [point.x, point.y]
+    });
+    return !!result;
+  } catch { return false; }
+}
 async function clickType(tab, action, width, height) {
   return debug(tab.id, async target => {
     const live = await liveViewport(target);
     const point = scalePoint(action, width, height, live);
-    if (action.type === 'type') {
-      const check = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: (x,y) => { const e = document.elementFromPoint(x,y); return !!e && (e.tagName === 'TEXTAREA' || (e.tagName === 'INPUT' && ['text','search','email','url','tel'].includes(e.type)) || e.isContentEditable || e.getAttribute('role') === 'textbox') && !e.closest('form')?.querySelector('input[type=password]'); }, args: [point.x, point.y] });
-      if (!check[0].result) throw new Error('This is not an allowed text field. Password and login forms are blocked.');
+    await clickPoint(target, point);
+    await sleep(120);
+    if (action.type !== 'type') return {};
+    const focused = await readEditable(tab.id);
+    if (focused.password) throw new Error('Password and login fields are blocked.');
+    // Unreadable targets (canvas, iframe editors) must be typed into with real key events.
+    if (focused.kind !== 'editable') {
+      await typeKeys(target, action.text);
+      if (action.submit) { await sleep(150); await pressKey(target, 'Enter'); }
+      return { typed: 'keys', verified: null };
     }
-    await chrome.debugger.sendCommand(target, 'Input.dispatchMouseEvent', { type: 'mousePressed', x: point.x, y: point.y, button: 'left', clickCount: 1 });
-    await chrome.debugger.sendCommand(target, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x: point.x, y: point.y, button: 'left', clickCount: 1 });
-    if (action.type === 'type') {
-      const focused = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: (x,y) => { const e = document.elementFromPoint(x,y); return !!e && (document.activeElement === e || e.contains(document.activeElement)) && (e.tagName === 'TEXTAREA' || (e.tagName === 'INPUT' && ['text','search','email','url','tel'].includes(e.type)) || e.isContentEditable || e.getAttribute('role') === 'textbox') && !e.closest('form')?.querySelector('input[type=password]'); }, args: [point.x, point.y] });
-      if (!focused[0].result) throw new Error('The text field changed or could not be focused.');
-      await chrome.debugger.sendCommand(target, 'Input.insertText', { text: action.text });
-      if (action.submit) {
-        await chrome.debugger.sendCommand(target, 'Input.dispatchKeyEvent', { type: 'keyDown', windowsVirtualKeyCode: 13, key: 'Enter', text: '\r' });
-        await chrome.debugger.sendCommand(target, 'Input.dispatchKeyEvent', { type: 'keyUp', windowsVirtualKeyCode: 13, key: 'Enter' });
-      }
+    await chrome.debugger.sendCommand(target, 'Input.insertText', { text: action.text });
+    await sleep(150);
+    const after = await readEditable(tab.id);
+    if (after.password) throw new Error('Password and login fields are blocked.');
+    if (after.kind === 'editable' && after.value === focused.value) {
+      await typeKeys(target, action.text);
+      if (action.submit) { await sleep(150); await pressKey(target, 'Enter'); }
+      return { typed: 'keys-after-insert', verified: null };
     }
-    return {};
+    if (action.submit) { await sleep(150); await pressKey(target, 'Enter'); }
+    return { typed: 'insertText' };
   });
+}
+async function actOnTab(fresh, action, message) {
+  if (action.type === 'navigate') { const url = new URL(action.url); if (!permitted(url.href) || url.username || url.password) throw new Error('Only HTTPS or local URLs are allowed.'); await chrome.tabs.update(fresh.id, { url: url.href }); return { effect: { verified: null } }; }
+  if (action.type === 'read') { const page = await readPage(fresh.id); return { title: page.title, text: page.text, effect: { verified: true } }; }
+  if (action.type === 'wait') { const seconds = Number(action.seconds); if (!Number.isFinite(seconds) || seconds < 1 || seconds > 10) throw new Error('Invalid wait duration.'); await sleep(Math.round(seconds * 1000)); return { effect: { verified: null } }; }
+  const before = await signature(fresh.id);
+  if (action.type === 'key') await debug(fresh.id, target => pressKey(target, action.key));
+  else if (action.type === 'scroll') {
+    if (!['up', 'down'].includes(action.direction)) throw new Error('Invalid scroll direction.');
+    await chrome.scripting.executeScript({ target: { tabId: fresh.id }, func: direction => window.scrollBy({ top: direction === 'up' ? -Math.round(innerHeight * .75) : Math.round(innerHeight * .75), behavior: 'instant' }), args: [action.direction] });
+  } else if (['click', 'type'].includes(action.type)) {
+    if (![action.x, action.y, message.width, message.height].every(Number.isFinite) || action.x < 0 || action.y < 0 || action.x >= message.width || action.y >= message.height) throw new Error('Invalid action coordinates.');
+    if (action.type === 'type' && (typeof action.text !== 'string' || action.text.length > 5000)) throw new Error('Invalid text.');
+    const extra = await clickType(fresh, action, message.width, message.height);
+    let after = await settle(fresh.id, before);
+    let verified = extra.verified !== undefined && extra.verified !== null ? extra.verified : (before && after ? before !== after : null);
+    let fallback = false;
+    // A click that changed nothing is usually a control that wants a scripted event.
+    if (action.type === 'click' && verified === false) {
+      fallback = await clickElement(fresh.id, scalePoint(action, message.width, message.height, await liveViewportSafe(fresh.id)));
+      after = await settle(fresh.id, before);
+      verified = before && after ? before !== after : null;
+    }
+    return { ...extra, fallback, effect: { verified } };
+  } else throw new Error('Unknown action.');
+  const after = await settle(fresh.id, before);
+  return { effect: { verified: before && after ? before !== after : null } };
+}
+async function liveViewportSafe(tabId) {
+  try { return await debug(tabId, target => liveViewport(target)); } catch { return null; }
 }
 async function handle(message) {
   if (message.type === 'tabs') {
@@ -178,7 +300,7 @@ async function handle(message) {
     const tab = message.tabId ? await getTab(message.tabId) : (await chrome.tabs.query({ active: true, currentWindow: true }))[0];
     if (!tab?.id || !tab.url) throw new Error('Select a webpage first.');
     if (!permitted(tab.url)) throw new Error('Select an HTTPS page (or a local development page). Chrome internal pages are not supported.');
-    if (message.activate) { await chrome.tabs.update(tab.id, { active: true }); await new Promise(resolve => setTimeout(resolve, 350)); }
+    if (message.activate) { await chrome.tabs.update(tab.id, { active: true }); await sleep(350); }
     const fresh = await getTab(tab.id);
     const [page, shot] = await Promise.all([readPage(fresh.id), shoot(fresh.id)]);
     return { tabId: fresh.id, url: fresh.url, title: page.title, text: page.text, elements: page.elements, ...shot };
@@ -190,28 +312,12 @@ async function handle(message) {
     if (!samePage(tab.url, message.url)) throw new Error('That page changed. Observe it again.');
     const action = message.action;
     if (action?.type === 'think') return {};
+    if (!action || !['click', 'type', 'read', 'scroll', 'wait', 'navigate', 'key'].includes(action.type)) throw new Error('Unknown action.');
     await chrome.tabs.update(tab.id, { active: true });
-    await new Promise(resolve => setTimeout(resolve, 250));
+    await sleep(250);
     const fresh = await getTab(tab.id);
     if (!samePage(fresh.url, message.url)) throw new Error('That page changed. Observe it again.');
-    if (action.type === 'navigate') { const url = new URL(action.url); if (!permitted(url.href) || url.username || url.password) throw new Error('Only HTTPS or local URLs are allowed.'); await chrome.tabs.update(fresh.id, { url: url.href }); return {}; }
-    if (action.type === 'read') { const page = await readPage(fresh.id); return { title: page.title, text: page.text }; }
-    if (action.type === 'key') {
-      const keys = { Enter: [13, 'Enter', '\r'], Escape: [27, 'Escape', 'Escape'], Tab: [9, 'Tab', '\t'], ArrowUp: [38, 'ArrowUp', ''], ArrowDown: [40, 'ArrowDown', ''], ArrowLeft: [37, 'ArrowLeft', ''], ArrowRight: [39, 'ArrowRight', ''], PageUp: [33, 'PageUp', ''], PageDown: [34, 'PageDown', ''], Home: [36, 'Home', ''], End: [35, 'End', ''], Backspace: [8, 'Backspace', ''] };
-      const key = keys[action.key];
-      if (!key) throw new Error('Unsupported key.');
-      const [code, name, text] = key;
-      await debug(fresh.id, async target => {
-        await chrome.debugger.sendCommand(target, 'Input.dispatchKeyEvent', { type: 'keyDown', windowsVirtualKeyCode: code, key: name, ...(text ? { text } : {}) });
-        await chrome.debugger.sendCommand(target, 'Input.dispatchKeyEvent', { type: 'keyUp', windowsVirtualKeyCode: code, key: name });
-      });
-      return {};
-    }
-    if (action.type === 'wait') { const seconds = Number(action.seconds); if (!Number.isFinite(seconds) || seconds < 1 || seconds > 10) throw new Error('Invalid wait duration.'); await new Promise(resolve => setTimeout(resolve, Math.round(seconds * 1000))); return {}; }
-    if (action.type === 'scroll') { if (!['up', 'down'].includes(action.direction)) throw new Error('Invalid scroll direction.'); await chrome.scripting.executeScript({ target: { tabId: fresh.id }, func: direction => window.scrollBy({ top: direction === 'up' ? -Math.round(innerHeight * .75) : Math.round(innerHeight * .75), behavior: 'instant' }), args: [action.direction] }); return {}; }
-    if (!['click', 'type'].includes(action.type) || ![action.x, action.y, message.width, message.height].every(Number.isFinite) || action.x < 0 || action.y < 0 || action.x >= message.width || action.y >= message.height) throw new Error('Invalid action coordinates.');
-    if (action.type === 'type' && (typeof action.text !== 'string' || action.text.length > 5000)) throw new Error('Invalid text.');
-    return clickType(fresh, action, message.width, message.height);
+    return actOnTab(fresh, action, message);
   }
   throw new Error('Unknown action.');
 }
