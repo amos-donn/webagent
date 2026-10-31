@@ -13,8 +13,9 @@ async function handle(message) {
     if (tab.id !== message.tabId || tab.url !== message.url) throw new Error('The active page changed. Observe it again.');
     const action = message.action;
     if (action.type === 'navigate') { const url = new URL(action.url); if (!permitted(url.href) || url.username || url.password) throw new Error('Only HTTPS or local URLs are allowed.'); await chrome.tabs.update(tab.id, { url: url.href }); return {}; }
-    if (action.type === 'scroll') { await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: direction => window.scrollBy({ top: direction === 'up' ? -Math.round(innerHeight * .75) : Math.round(innerHeight * .75), behavior: 'instant' }), args: [action.direction] }); return {}; }
+    if (action.type === 'scroll') { if (!['up', 'down'].includes(action.direction)) throw new Error('Invalid scroll direction.'); await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: direction => window.scrollBy({ top: direction === 'up' ? -Math.round(innerHeight * .75) : Math.round(innerHeight * .75), behavior: 'instant' }), args: [action.direction] }); return {}; }
     if (!['click', 'type'].includes(action.type) || ![action.x, action.y, message.width, message.height].every(Number.isFinite) || action.x < 0 || action.y < 0 || action.x >= message.width || action.y >= message.height) throw new Error('Invalid action coordinates.');
+    if (action.type === 'type' && (typeof action.text !== 'string' || action.text.length > 5000)) throw new Error('Invalid text.');
     return debug(tab.id, async target => {
       const metrics = await chrome.debugger.sendCommand(target, 'Page.getLayoutMetrics'); const view = metrics.cssVisualViewport || metrics.visualViewport;
       if (Math.abs(view.clientWidth - message.width) > 1 || Math.abs(view.clientHeight - message.height) > 1) throw new Error('The page viewport changed. Observe it again.');
@@ -24,7 +25,11 @@ async function handle(message) {
       }
       await chrome.debugger.sendCommand(target, 'Input.dispatchMouseEvent', { type: 'mousePressed', x: action.x, y: action.y, button: 'left', clickCount: 1 });
       await chrome.debugger.sendCommand(target, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x: action.x, y: action.y, button: 'left', clickCount: 1 });
-      if (action.type === 'type') { if (typeof action.text !== 'string' || action.text.length > 5000) throw new Error('Invalid text.'); await chrome.debugger.sendCommand(target, 'Input.insertText', { text: action.text }); }
+      if (action.type === 'type') {
+        const focused = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: (x,y) => { const e = document.elementFromPoint(x,y); return !!e && (document.activeElement === e || e.contains(document.activeElement)) && (e.tagName === 'TEXTAREA' || (e.tagName === 'INPUT' && ['text','search','email','url','tel'].includes(e.type)) || e.isContentEditable || e.getAttribute('role') === 'textbox') && !e.closest('form')?.querySelector('input[type=password]'); }, args: [action.x, action.y] });
+        if (!focused[0].result) throw new Error('The text field changed or could not be focused.');
+        await chrome.debugger.sendCommand(target, 'Input.insertText', { text: action.text });
+      }
       return {};
     });
   }
