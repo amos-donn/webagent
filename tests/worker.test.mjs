@@ -19,6 +19,17 @@ test('agent uses free OpenRouter vision and JSON request, returning a validated 
   };
   try { const response = await worker.fetch(request(observation), {DB:db, OPENROUTER_API_KEY:'test-key'}); assert.equal(response.status, 200); assert.equal((await response.json()).action.type, 'click'); } finally { globalThis.fetch = original; }
 });
+test('other tabs are sent as read-only context', async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = async (url, options) => {
+    const prompt = JSON.parse(options.body).messages[0].content[0].text;
+    assert.match(prompt, /OTHER OPEN TABS/);
+    assert.match(prompt, /Docs page/);
+    assert.doesNotMatch(prompt, /not-a-url/);
+    return Response.json({ choices:[{ message:{ content:JSON.stringify({type:'done', summary:'ok'}) } }] });
+  };
+  try { const response = await worker.fetch(request({ ...observation, contexts:[{ url:'https://docs.example/', title:'Docs page', text:'Reference material' }, { url:'', title:'bad', text:'not-a-url' }] }), {DB:db, OPENROUTER_API_KEY:'test-key'}); assert.equal(response.status, 200); } finally { globalThis.fetch = original; }
+});
 test('missing key and invalid coordinates fail safely', async () => {
   const missing = await worker.fetch(request(observation), {DB:db});
   assert.match((await missing.json()).error, /OPENROUTER_API_KEY/);
