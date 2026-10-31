@@ -1,5 +1,5 @@
 const $ = id => document.getElementById(id);
-let token = '', email = '', tokenBase = '', workflow = null, proposal = null;
+let token = '', email = '', tokenBase = '', workflow = null, proposal = null, pending = null;
 function notify(text, error = false) { $('notice').textContent = text; $('notice').classList.toggle('error', error); $('notice').hidden = false; }
 function baseUrl() { const url = new URL($('worker').value.trim()); if (url.username || url.password || url.search || url.hash || (url.protocol !== 'https:' && !(url.protocol === 'http:' && ['localhost','127.0.0.1'].includes(url.hostname)))) throw new Error('Use an HTTPS Worker URL or localhost.'); return url.origin + url.pathname.replace(/\/$/, ''); }
 function originPattern(value) { const u = new URL(value); if (u.protocol !== 'https:' && !(u.protocol === 'http:' && ['localhost','127.0.0.1'].includes(u.hostname))) throw new Error('Only HTTPS and local pages are supported.'); return `${u.protocol}//${u.hostname}/*`; }
@@ -7,12 +7,14 @@ async function permission(value) { const origins = [originPattern(value)]; if (!
 async function activeUrl() { const [tab] = await chrome.tabs.query({ active: true, currentWindow: true }); if (!tab?.url) throw new Error('Select a webpage first.'); return tab.url; }
 async function api(path, data) { const base = baseUrl(); if (token && base !== tokenBase) throw new Error('Worker changed. Sign out and sign in to the new server.'); const res = await fetch(base + path, { method: 'POST', headers: { 'Content-Type':'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) }, body: JSON.stringify(data) }); const out = await res.json().catch(() => ({})); if (!res.ok) throw new Error(out.error || `Request failed (${res.status}).`); return out; }
 async function send(type, data = {}) { const out = await chrome.runtime.sendMessage({ type, ...data }); if (out.error) throw new Error(out.error); return out.data; }
-function authView() { $('auth-form').hidden = !!token; $('signed-in').hidden = !token; $('account-email').textContent = email; $('connection-status').textContent = token ? 'Connected ●' : 'Not connected'; }
+function authView() { $('auth-form').hidden = !!token; $('signed-in').hidden = !token; $('account-email').textContent = email; $('account-btn').textContent = token ? (email.split('@')[0] || 'Account') : 'Sign in'; $('connection-status').textContent = token ? 'Connected ●' : 'Not connected'; }
+function openAuth() { if (!$('auth-dialog').open) $('auth-dialog').showModal(); }
+function closeAuth() { if ($('auth-dialog').open) $('auth-dialog').close(); }
 function task(id, fn) { $(id).addEventListener('click', async () => { $(id).disabled = true; try { await fn(); } catch (e) { notify(e.message || 'Something went wrong.', true); } finally { $(id).disabled = false; } }); }
-async function auth(path) { const base = baseUrl(); await permission(base); const result = await api(path, { email:$('email').value, password:$('password').value, invite:$('invite').value }); token = result.token; email = result.email; tokenBase = base; $('password').value = ''; $('invite').value = ''; await chrome.storage.local.set({ worker:base, token, email }); authView(); notify('Connected. Your account is ready.'); }
+async function auth(path) { const base = baseUrl(); await permission(base); const result = await api(path, { email:$('email').value, password:$('password').value, invite:$('invite').value }); token = result.token; email = result.email; tokenBase = base; $('password').value = ''; $('invite').value = ''; await chrome.storage.local.set({ worker:base, token, email }); authView(); closeAuth(); notify('Signed in.'); const queued = pending; pending = null; if (queued) await startWorkflow(queued.goal, queued.auto); }
 task('login', () => auth('/login')); task('signup', () => auth('/signup'));
-task('logout', async () => { await api('/logout', {}); token = ''; email = ''; tokenBase = ''; await chrome.storage.local.remove(['token','email']); authView(); stop(); notify('Signed out.'); });
-function stop() { workflow = null; proposal = null; $('approval').hidden = true; $('continue').hidden = true; $('stop').hidden = true; $('start').hidden = false; $('full-access').disabled = false; $('loading').hidden = true; }
+task('logout', async () => { await api('/logout', {}); token = ''; email = ''; tokenBase = ''; await chrome.storage.local.remove(['token','email']); authView(); closeAuth(); stop(); notify('Signed out.'); });
+function stop() { workflow = null; proposal = null; $('approval').hidden = true; $('continue').hidden = true; $('stop').hidden = true; $('start').hidden = false; $('goal').disabled = false; $('full-access').disabled = false; $('loading').hidden = true; }
 function loading(label, icon) { $('loading-label').textContent = label; $('loading-icon').textContent = icon; $('loading').hidden = false; }
 function addMessage(text, kind = 'agent') { const el = document.createElement('div'); el.className = `message ${kind}`; el.textContent = text; $('steps').append(el); el.scrollIntoView({ behavior:'smooth', block:'nearest' }); }
 function addStep(action, url) { const details = document.createElement('details'); details.className = 'activity'; const summary = document.createElement('summary'); summary.textContent = `${({ click:'⌖', type:'⌨', scroll:'↕', navigate:'↗' })[action.type] || '✳'}  ${action.type.charAt(0).toUpperCase() + action.type.slice(1)}`; const thought = document.createElement('p'); thought.textContent = action.description || 'Action completed.'; const page = document.createElement('p'); page.className = 'page-url'; page.textContent = `Webpage: ${url}`; details.append(summary, thought, page); if (action.type === 'type') { const text = document.createElement('p'); text.textContent = `Text: ${action.text}`; details.append(text); } if (action.type === 'navigate') { const dest = document.createElement('p'); dest.textContent = `Destination: ${action.url}`; details.append(dest); } $('steps').append(details); details.scrollIntoView({ behavior:'smooth', block:'nearest' }); }
@@ -48,7 +50,33 @@ async function execute(run) {
   if (run.auto) { loading('Waiting for the page', '◌'); await new Promise(resolve => setTimeout(resolve, 1500)); if (workflow === run) await next(run); }
   else { $('loading').hidden = true; $('continue').hidden = false; notify('Action completed. Continue when the page has settled.'); }
 }
-task('start', async () => { if (!token) throw new Error('Sign in first.'); const goal = $('goal').value.trim(); if (!goal || goal.length > 4000) throw new Error('Enter an objective of up to 4,000 characters.'); const auto = $('full-access').checked; if (auto && !confirm('Full access will let the agent click, type, navigate, and submit actions without asking each time. Website changes may be irreversible. Continue?')) return; await permission(await activeUrl()); workflow = { goal, steps:[], auto }; const run = workflow; $('steps').textContent = ''; addMessage(goal, 'user'); $('start').hidden = true; $('stop').hidden = false; $('full-access').disabled = true; try { await next(run); } catch (e) { if (workflow === run) stop(); throw e; } });
+async function startWorkflow(goal, auto) {
+  await permission(await activeUrl());
+  workflow = { goal, steps:[], auto };
+  const run = workflow;
+  if ($('steps').querySelector('.welcome')) $('steps').textContent = '';
+  addMessage(goal, 'user');
+  $('goal').value = ''; $('goal').style.height = '';
+  $('start').hidden = true; $('stop').hidden = false; $('goal').disabled = true; $('full-access').disabled = true;
+  try { await next(run); } catch (e) { if (workflow === run) stop(); throw e; }
+}
+$('composer').addEventListener('submit', async event => {
+  event.preventDefault();
+  if (workflow) return;
+  const goal = $('goal').value.trim();
+  if (!goal) return;
+  if (goal.length > 4000) { notify('Keep your task under 4,000 characters.', true); return; }
+  const auto = $('full-access').checked;
+  if (!token) { pending = { goal, auto }; openAuth(); return; }
+  if (auto && !confirm('Full access will let the agent click, type, navigate, and submit actions without asking each time. Website changes may be irreversible. Continue?')) return;
+  $('goal').value = goal;
+  try { await startWorkflow(goal, auto); } catch (e) { notify(e.message || 'Something went wrong.', true); }
+});
+$('goal').addEventListener('keydown', event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); $('composer').requestSubmit(); } });
+$('goal').addEventListener('input', () => { $('goal').style.height = 'auto'; $('goal').style.height = `${Math.min($('goal').scrollHeight, 160)}px`; });
+$('account-btn').addEventListener('click', openAuth);
+$('auth-close').addEventListener('click', event => { event.preventDefault(); closeAuth(); });
+$('auth-dialog').addEventListener('click', event => { if (event.target === $('auth-dialog')) closeAuth(); });
 task('approve', async () => { const run = workflow; if (!proposal || !run) throw new Error('Start a workflow first.'); if (proposal.action.type === 'navigate') await permission(proposal.action.url); if (workflow !== run) return; try { await execute(run); } catch (e) { if (workflow === run) { $('loading').hidden = true; $('continue').hidden = false; } throw e; } });
 task('continue', async () => { const run = workflow; if (!run) return; await permission(await activeUrl()); if (workflow !== run) return; $('continue').hidden = true; try { await next(run); } catch (e) { if (workflow === run) { $('loading').hidden = true; $('continue').hidden = false; } throw e; } });
 $('reject').addEventListener('click', () => { stop(); notify('Workflow stopped without taking the proposed action.'); }); $('stop').addEventListener('click', () => { stop(); notify('Workflow stopped. An action already in progress may still finish.'); });
