@@ -30,6 +30,16 @@ test('other tabs are sent as read-only context', async () => {
   };
   try { const response = await worker.fetch(request({ ...observation, contexts:[{ url:'https://docs.example/', title:'Docs page', text:'Reference material' }, { url:'', title:'bad', text:'not-a-url' }] }), {DB:db, OPENROUTER_API_KEY:'test-key'}); assert.equal(response.status, 200); } finally { globalThis.fetch = original; }
 });
+test('think, read and wait actions validate, bad wait durations fail', async () => {
+  const original = globalThis.fetch;
+  const outputs = [{type:'think', description:'plan note'}, {type:'read', description:'get text'}, {type:'wait', seconds:3, description:'loading'}, {type:'wait', seconds:99, description:'too long'}];
+  globalThis.fetch = async () => Response.json({ choices:[{ message:{ content:JSON.stringify(outputs.shift()) } }] });
+  try {
+    for (const expected of ['think','read','wait']) { const response = await worker.fetch(request(observation), {DB:db, OPENROUTER_API_KEY:'test-key'}); assert.equal(response.status, 200); assert.equal((await response.json()).action.type, expected); }
+    const bad = await worker.fetch(request(observation), {DB:db, OPENROUTER_API_KEY:'test-key'});
+    assert.equal(bad.status, 400); assert.match((await bad.json()).error, /wait/);
+  } finally { globalThis.fetch = original; }
+});
 test('missing key and invalid coordinates fail safely', async () => {
   const missing = await worker.fetch(request(observation), {DB:db});
   assert.match((await missing.json()).error, /OPENROUTER_API_KEY/);

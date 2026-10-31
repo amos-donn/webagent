@@ -56,11 +56,14 @@ async function handle(message) {
     if (!permitted(tab.url)) throw new Error('Select an HTTPS page (or a local development page). Chrome internal pages are not supported.');
     if (tab.url !== message.url) throw new Error('That page changed. Observe it again.');
     const action = message.action;
+    if (action?.type === 'think') return {};
     await chrome.tabs.update(tab.id, { active: true });
     await new Promise(resolve => setTimeout(resolve, 250));
     const fresh = await getTab(tab.id);
     if (fresh.url !== message.url) throw new Error('That page changed. Observe it again.');
     if (action.type === 'navigate') { const url = new URL(action.url); if (!permitted(url.href) || url.username || url.password) throw new Error('Only HTTPS or local URLs are allowed.'); await chrome.tabs.update(fresh.id, { url: url.href }); return {}; }
+    if (action.type === 'read') { const result = await readText(fresh.id); return { title: result.title, text: result.text }; }
+    if (action.type === 'wait') { const seconds = Number(action.seconds); if (!Number.isFinite(seconds) || seconds < 1 || seconds > 10) throw new Error('Invalid wait duration.'); await new Promise(resolve => setTimeout(resolve, Math.round(seconds * 1000))); return {}; }
     if (action.type === 'scroll') { if (!['up', 'down'].includes(action.direction)) throw new Error('Invalid scroll direction.'); await chrome.scripting.executeScript({ target: { tabId: fresh.id }, func: direction => window.scrollBy({ top: direction === 'up' ? -Math.round(innerHeight * .75) : Math.round(innerHeight * .75), behavior: 'instant' }), args: [action.direction] }); return {}; }
     if (!['click', 'type'].includes(action.type) || ![action.x, action.y, message.width, message.height].every(Number.isFinite) || action.x < 0 || action.y < 0 || action.x >= message.width || action.y >= message.height) throw new Error('Invalid action coordinates.');
     if (action.type === 'type' && (typeof action.text !== 'string' || action.text.length > 5000)) throw new Error('Invalid text.');
