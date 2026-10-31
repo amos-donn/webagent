@@ -164,13 +164,15 @@ async function next(run, prefetched) {
   const done = plan.filter(t => t.done).length;
   loading(plan.length ? `Thinking · ${done}/${plan.length} plan steps · action ${run.steps.length + 1}/${STEP_LIMIT}` : `Thinking about action ${run.steps.length + 1}`, '✳');
   const started = performance.now();
-  const { actions, completed, incomplete, ms } = await api('/agent', { goal:run.goal, todos:plan, steps:run.steps, url:shot.url, title:shot.title, text:shot.text, image:shot.image, width:image.naturalWidth, height:image.naturalHeight, elements, stalled:run.stalled, automatic:run.auto, contexts:extra });
+  const { actions, action, completed, incomplete, ms } = await api('/agent', { goal:run.goal, todos:plan, steps:run.steps, url:shot.url, title:shot.title, text:shot.text, image:shot.image, width:image.naturalWidth, height:image.naturalHeight, elements, stalled:run.stalled, automatic:run.auto, contexts:extra });
   const elapsed = ms ?? Math.round(performance.now() - started);
   if (workflow !== run) return;
   const ticked = applyCompleted(run, completed);
   if (run.unproven) { addMessage(`${run.unproven} plan step${run.unproven === 1 ? '' : 's'} were claimed done without a verified action, so the tick waits until the work is proven.`); run.unproven = 0; }
   if (ticked) saveSession(run);
-  const finish = actions.find(a => a.type === 'done');
+  // An older Worker only returns "action"; both shapes work here.
+  const batch = Array.isArray(actions) && actions.length ? actions : (action ? [action] : []);
+  const finish = batch.find(a => a.type === 'done');
   if (finish) {
     addMessage(finish.summary || 'Workflow complete.');
     saveSession(run);
@@ -183,7 +185,7 @@ async function next(run, prefetched) {
     }
     stop(); notify('Workflow complete.'); return;
   }
-  run.queue = actions.slice();
+  run.queue = batch.slice();
   showProposal(run, run.queue[0], run.queue.length - 1);
   if (run.auto) { $('approval').hidden = true; await runBatch(run); }
   else notify(`Review the queued action${run.queue.length > 1 ? ` (${run.queue.length} queued)` : ''} before it runs.`);
