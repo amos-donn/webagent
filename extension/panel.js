@@ -1,7 +1,9 @@
 const $ = id => document.getElementById(id);
 let workflow = null, proposal = null, plan = [];
-const ICONS = { think:'💭', click:'⌖', type:'⌨', read:'📖', scroll:'↕', wait:'⏳', navigate:'↗' };
-const LABELS = { think:'Thinking through', click:'Clicking', type:'Typing', read:'Reading page', scroll:'Scrolling', wait:'Waiting', navigate:'Navigating' };
+const ICONS = { think:'💭', click:'⌖', type:'⌨', read:'📖', scroll:'↕', wait:'⏳', navigate:'↗', key:'⏎' };
+const LABELS = { think:'Thinking through', click:'Clicking', type:'Typing', read:'Reading page', scroll:'Scrolling', wait:'Waiting', navigate:'Navigating', key:'Pressing key' };
+const CONTINUE = 'Continue to next step ↗';
+const STEP_LIMIT = 40;
 function notify(text, error = false) { $('notice').textContent = text; $('notice').classList.toggle('error', error); $('notice').hidden = false; }
 function baseUrl() { const url = new URL($('worker').value.trim()); if (url.username || url.password || url.search || url.hash || (url.protocol !== 'https:' && !(url.protocol === 'http:' && ['localhost','127.0.0.1'].includes(url.hostname)))) throw new Error('Use an HTTPS Worker URL or localhost.'); return url.origin + url.pathname.replace(/\/$/, ''); }
 function originPattern(value) { const u = new URL(value); if (u.protocol !== 'https:' && !(u.protocol === 'http:' && ['localhost','127.0.0.1'].includes(u.hostname))) throw new Error('Only HTTPS and local pages are supported.'); return `${u.protocol}//${u.hostname}/*`; }
@@ -54,24 +56,57 @@ function completeTodos(ids = []) {
   if (changed) renderPlan();
   return changed;
 }
-async function api(path, data) { const base = baseUrl(); const res = await fetch(base + path, { method: 'POST', headers: { 'Content-Type':'application/json' }, body: JSON.stringify(data) }); const out = await res.json().catch(() => ({})); if (!res.ok) throw new Error(out.error || `Request failed (${res.status}).`); return out; }
+async function api(path, data, retries = 2) {
+  const base = baseUrl();
+  let lastError = new Error('Request failed.');
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const res = await fetch(base + path, { method: 'POST', headers: { 'Content-Type':'application/json' }, body: JSON.stringify(data) });
+      const out = await res.json().catch(() => ({}));
+      if (res.ok) return out;
+      const error = new Error(out.error || `Request failed (${res.status}).`);
+      if (res.status < 500 && res.status !== 429) throw error;
+      lastError = error;
+    } catch (e) {
+      lastError = e;
+      if (/failed \(4/.test(e.message) || /limit reached/i.test(e.message)) throw e;
+    }
+    if (attempt < retries) await new Promise(resolve => setTimeout(resolve, 400 * (attempt + 1)));
+  }
+  throw lastError;
+}
 async function send(type, data = {}) { const out = await chrome.runtime.sendMessage({ type, ...data }); if (out.error) throw new Error(out.error); return out.data; }
 function task(id, fn) { $(id).addEventListener('click', async () => { $(id).disabled = true; try { await fn(); } catch (e) { notify(e.message || 'Something went wrong.', true); } finally { $(id).disabled = false; } }); }
-function stop() { workflow = null; proposal = null; currentAction(null); $('approval').hidden = true; $('continue').hidden = true; $('stop').hidden = true; $('start').hidden = false; $('goal').disabled = false; $('full-access').disabled = false; $('loading').hidden = true; renderPlan(); }
+function stop() { workflow = null; proposal = null; currentAction(null); $('approval').hidden = true; $('continue').hidden = true; $('stop').hidden = true; $('start').hidden = false; $('goal').disabled = false; $('full-access').disabled = false; $('loading').hidden = true; $('continue').textContent = CONTINUE; renderPlan(); }
 function loading(label, icon) { $('loading-label').textContent = label; $('loading-icon').textContent = icon; $('loading').hidden = false; }
 function addMessage(text, kind = 'agent') { const el = document.createElement('div'); el.className = `message ${kind}`; el.textContent = text; $('steps').append(el); el.scrollIntoView({ behavior:'smooth', block:'nearest' }); }
 function currentAction(label) { const el = $('current-action'); if (!label) { if (el) el.remove(); return; } if (el) { el.textContent = `● ${label}`; } else { const row = document.createElement('div'); row.id = 'current-action'; row.className = 'message current'; row.textContent = `● ${label}`; $('steps').append(row); } $('current-action').scrollIntoView({ behavior:'smooth', block:'nearest' }); }
-function addStep(action, url, result, elapsed) { const details = document.createElement('details'); details.className = 'activity'; const summary = document.createElement('summary'); summary.textContent = `${ICONS[action.type] || '✳'}  ${action.type.charAt(0).toUpperCase() + action.type.slice(1)}${elapsed ? ` · ${(elapsed / 1000).toFixed(1)}s` : ''}`; const thought = document.createElement('p'); thought.textContent = action.description || 'Action completed.'; const page = document.createElement('p'); page.className = 'page-url'; page.textContent = `Webpage: ${url}`; details.append(summary, thought, page); if (action.type === 'type') { const text = document.createElement('p'); text.textContent = `Text: ${action.text}`; details.append(text); } if (action.type === 'navigate') { const dest = document.createElement('p'); dest.textContent = `Destination: ${action.url}`; details.append(dest); } if (action.type === 'wait') { const wait = document.createElement('p'); wait.textContent = `Wait: ${action.seconds}s`; details.append(wait); } if (action.type === 'read' && result?.text) { const excerpt = document.createElement('p'); excerpt.textContent = `Read ${result.title || 'page'}: ${String(result.text).slice(0, 500)}`; details.append(excerpt); } $('steps').append(details); details.scrollIntoView({ behavior:'smooth', block:'nearest' }); }
+function addStep(action, url, result, elapsed, failure) {
+  const details = document.createElement('details'); details.className = 'activity' + (failure ? ' failed' : '');
+  const summary = document.createElement('summary');
+  summary.textContent = `${ICONS[action.type] || '✳'}  ${action.type.charAt(0).toUpperCase() + action.type.slice(1)}${elapsed ? ` · ${(elapsed / 1000).toFixed(1)}s` : ''}${failure ? ' · failed' : ''}`;
+  const thought = document.createElement('p'); thought.textContent = action.description || 'Action completed.';
+  const page = document.createElement('p'); page.className = 'page-url'; page.textContent = `Webpage: ${url}`;
+  details.append(summary, thought, page);
+  if (failure) { const error = document.createElement('p'); error.className = 'step-error'; error.textContent = failure; details.append(error); details.open = true; }
+  if (action.type === 'type') { const text = document.createElement('p'); text.textContent = `Text: ${action.text}${action.submit ? ' (then Enter)' : ''}`; details.append(text); }
+  if (action.type === 'navigate') { const dest = document.createElement('p'); dest.textContent = `Destination: ${action.url}`; details.append(dest); }
+  if (action.type === 'key') { const key = document.createElement('p'); key.textContent = `Key: ${action.key}`; details.append(key); }
+  if (action.type === 'wait') { const wait = document.createElement('p'); wait.textContent = `Wait: ${action.seconds}s`; details.append(wait); }
+  if (action.type === 'read' && result?.text) { const excerpt = document.createElement('p'); excerpt.textContent = `Read ${result.title || 'page'}: ${String(result.text).slice(0, 500)}`; details.append(excerpt); }
+  $('steps').append(details); details.scrollIntoView({ behavior:'smooth', block:'nearest' });
+}
+function textHash(text) { const value = String(text || ''); let hash = 0; for (let i = 0; i < value.length; i += 5) hash = (hash * 31 + value.charCodeAt(i)) | 0; return `${value.length}:${hash}`; }
 async function next(run, prefetched) {
   if (workflow !== run) return;
-  if (run.steps.length >= 30) { addMessage('Stopped at the 30-step limit.'); stop(); return; }
+  if (run.steps.length >= STEP_LIMIT) { addMessage(`Stopped at the ${STEP_LIMIT}-step limit. Start a new task or continue from where it left off.`); stop(); return; }
+  $('continue').textContent = CONTINUE;
   await listTabs().catch(() => {});
   const acting = tabCache.find(t => t.id === run.actingTabId) || tabCache.find(t => t.active) || tabCache[0];
   if (!acting) throw new Error('No open tab found. Open a webpage first.');
   if (!acting.supported) throw new Error('The acting tab is not supported. Pick an HTTPS page — Chrome internal pages are blocked.');
   run.actingTabId = acting.id;
   const contexts = tabCache.filter(t => run.contextIds.includes(t.id) && t.id !== acting.id && t.supported).slice(0, 5);
-  // Automatic mode cannot request new origins without a user gesture. Pause rather than acting without permission.
   for (const t of [acting, ...contexts]) {
     if (!await chrome.permissions.contains({ origins:[originPattern(t.url)] })) {
       if (run.auto) { $('continue').hidden = false; $('loading').hidden = true; notify(`“${shortTitle(t)}” needs site access. Select Continue to grant permission.`); return; }
@@ -80,22 +115,38 @@ async function next(run, prefetched) {
   }
   let shot = prefetched;
   if (!shot) { loading(`Reading ${shortTitle(acting)}`, '◉'); shot = await send('observe', { tabId: acting.id, activate: true }); if (workflow !== run) return; }
+  const hash = textHash(shot.text);
+  run.stalled = hash === run.lastHash ? (run.stalled || 0) + 1 : 0;
+  run.lastHash = hash;
   // Context tabs are independent reads, so fetch them together instead of one after another.
   const extra = (await Promise.all(contexts.map(t => send('context', { tabId: t.id }).then(c => c.text ? { url: c.url, title: c.title, text: c.text.slice(0, 4000) } : null).catch(() => null)))).filter(Boolean);
   const image = $('screenshot'); image.src = `data:image/jpeg;base64,${shot.image}`; await image.decode();
+  const scale = image.naturalWidth / shot.width;
+  const elements = (shot.elements || []).map(el => ({ role: el.role, name: el.name, x: Math.round(el.x * scale), y: Math.round(el.y * scale) }));
   const done = plan.filter(t => t.done).length;
   loading(plan.length ? `Thinking · ${done}/${plan.length} plan steps done` : 'Thinking about the next step', '✳');
   const started = performance.now();
-  const { action, completed, ms } = await api('/agent', { goal:run.goal, todos:plan, steps:run.steps, url:shot.url, text:shot.text, image:shot.image, width:image.naturalWidth, height:image.naturalHeight, automatic:run.auto, contexts:extra });
+  const { action, completed, incomplete, ms } = await api('/agent', { goal:run.goal, todos:plan, steps:run.steps, url:shot.url, title:shot.title, text:shot.text, image:shot.image, width:image.naturalWidth, height:image.naturalHeight, elements, stalled:run.stalled, automatic:run.auto, contexts:extra });
   const elapsed = ms ?? Math.round(performance.now() - started);
   if (workflow !== run) return;
   if (completeTodos(completed)) saveSession(run);
-  if (action.type === 'done') { addMessage(action.summary || 'Workflow complete.'); stop(); notify('Workflow complete.'); return; }
+  if (action.type === 'done') {
+    addMessage(action.summary || 'Workflow complete.');
+    saveSession(run);
+    if (incomplete?.length) {
+      const titles = plan.filter(t => incomplete.includes(t.id)).map(t => t.title);
+      $('loading').hidden = true; $('approval').hidden = true;
+      $('continue').hidden = false; $('stop').hidden = false; $('continue').textContent = 'Keep working on the plan ↗';
+      notify(`Proposed finishing with ${titles.length} unchecked plan step${titles.length === 1 ? '' : 's'}: ${titles.join(' · ')}. Keep working, or Stop.`);
+      return;
+    }
+    stop(); notify('Workflow complete.'); return;
+  }
   proposal = { tabId:shot.tabId, url:shot.url, width:shot.width, height:shot.height, action:{ ...action } };
   currentAction(`Proposed ${action.type.toUpperCase()}: ${action.description || ''}`);
   const coordinate = ['click','type'].includes(action.type); $('marker').hidden = !coordinate;
   if (coordinate) { $('marker').style.left = `${action.x / image.naturalWidth * 100}%`; $('marker').style.top = `${action.y / image.naturalHeight * 100}%`; proposal.action.x = action.x / image.naturalWidth * shot.width; proposal.action.y = action.y / image.naturalHeight * shot.height; }
-  $('proposal').textContent = `${action.type.toUpperCase()}: ${action.description || 'Review the proposed action.'}${action.type === 'type' ? '\nText: ' + action.text : ''}${action.type === 'navigate' ? '\nDestination: ' + action.url : ''}${action.type === 'scroll' ? '\nDirection: ' + action.direction : ''}${action.type === 'wait' ? '\nWait: ' + action.seconds + 's' : ''}`;
+  $('proposal').textContent = `${action.type.toUpperCase()}: ${action.description || 'Review the proposed action.'}${action.type === 'type' ? '\nText: ' + action.text + (action.submit ? ' (then Enter)' : '') : ''}${action.type === 'navigate' ? '\nDestination: ' + action.url : ''}${action.type === 'scroll' ? '\nDirection: ' + action.direction : ''}${action.type === 'wait' ? '\nWait: ' + action.seconds + 's' : ''}${action.type === 'key' ? '\nKey: ' + action.key : ''}`;
   if (run.auto) {
     if (action.type === 'navigate' && !await chrome.permissions.contains({ origins:[originPattern(action.url)] })) { $('loading').hidden = true; $('approval').hidden = false; notify('The destination needs site access. Approve to grant it.'); return; }
     await execute(run, elapsed);
@@ -107,9 +158,23 @@ async function execute(run, elapsed) {
   loading(LABELS[current.action.type] || 'Working', ICONS[current.action.type] || '✳');
   currentAction(`Doing ${current.action.type.toUpperCase()}: ${current.action.description || ''}`);
   let result = {};
-  try { result = await send('act', current); } catch (error) { if (workflow === run) { $('loading').hidden = true; $('continue').hidden = false; } currentAction(null); throw error; }
+  try {
+    result = await send('act', current);
+  } catch (error) {
+    if (workflow !== run) return;
+    run.steps.push({ type: current.action.type, description: current.action.description || '', ok: false, note: error.message, page: current.url });
+    addStep(current.action, current.url, {}, 0, error.message);
+    saveSession(run); currentAction(null);
+    $('loading').hidden = true; $('continue').hidden = false;
+    notify(`${error.message} Continue to let the agent try a different approach.`, true);
+    return;
+  }
   if (workflow !== run) return;
-  const a = current.action; const note = a.type === 'read' && result?.text ? ` — page excerpt: ${String(result.text).slice(0, 4000)}` : ''; run.steps.push(`${a.type}: ${a.description}${a.type === 'type' ? ' (text: ' + a.text + ')' : ''}${a.type === 'navigate' ? ' (' + a.url + ')' : ''}${a.type === 'wait' ? ' (' + a.seconds + 's)' : ''}${note}`); addStep(a, current.url, result, elapsed); currentAction(null); saveSession(run);
+  const a = current.action;
+  const note = a.type === 'read' && result?.text ? `page excerpt: ${String(result.text).slice(0, 1500)}` : '';
+  run.steps.push({ type: a.type, description: a.description || '', ok: true, page: current.url, note, x: current.action.x, y: current.action.y, url: a.url, direction: a.direction, text: a.type === 'type' ? a.text : undefined });
+  run.lastHash = ''; run.stalled = 0;
+  addStep(a, current.url, result, elapsed); currentAction(null); saveSession(run);
   if (run.auto) { loading('Waiting for the page', '◌'); await new Promise(resolve => setTimeout(resolve, 900)); if (workflow === run) await next(run); }
   else { $('loading').hidden = true; $('continue').hidden = false; notify('Action completed. Continue when the page has settled.'); }
 }
@@ -118,7 +183,7 @@ async function startWorkflow(goal, auto) {
   const acting = tabCache.find(t => t.id === actingTabId) || tabCache.find(t => t.active) || tabCache[0];
   if (!acting) throw new Error('Open a webpage first.');
   await permission(acting.url);
-  workflow = { goal, steps:[], auto, actingTabId: acting.id, contextIds: [...contextIds] };
+  workflow = { goal, steps:[], auto, actingTabId: acting.id, contextIds: [...contextIds], stalled:0, lastHash:'' };
   const run = workflow;
   plan = [];
   $('steps').textContent = '';
@@ -126,6 +191,7 @@ async function startWorkflow(goal, auto) {
   addMessage(goal, 'user');
   $('goal').value = ''; $('goal').style.height = '';
   $('start').hidden = true; $('stop').hidden = false; $('goal').disabled = true; $('full-access').disabled = true;
+  $('continue').hidden = true; $('continue').textContent = CONTINUE;
   loading('Planning the workflow', '✳');
   try {
     // The plan only needs the goal and starting URL, so it runs while the page is being captured.
@@ -139,7 +205,13 @@ async function startWorkflow(goal, auto) {
     renderPlan();
     saveSession(run);
     await next(run, observed.value);
-  } catch (e) { if (workflow === run) stop(); throw e; }
+  } catch (e) {
+    if (workflow !== run) return;
+    $('loading').hidden = true;
+    $('continue').hidden = false;
+    saveSession(run);
+    throw e;
+  }
 }
 $('composer').addEventListener('submit', async event => {
   event.preventDefault();
@@ -158,7 +230,7 @@ $('settings-btn').addEventListener('click', () => { if (!$('settings-dialog').op
 $('settings-close').addEventListener('click', event => { event.preventDefault(); $('settings-dialog').close(); });
 $('settings-dialog').addEventListener('click', event => { if (event.target === $('settings-dialog')) $('settings-dialog').close(); });
 $('plan-clear').addEventListener('click', async () => { if (workflow) return; plan = []; renderPlan(); await chrome.storage.local.remove('session'); });
-task('approve', async () => { const run = workflow; if (!proposal || !run) throw new Error('Start a workflow first.'); if (proposal.action.type === 'navigate') await permission(proposal.action.url); if (workflow !== run) return; try { await execute(run); } catch (e) { if (workflow === run) { $('loading').hidden = true; $('continue').hidden = false; } throw e; } });
+task('approve', async () => { const run = workflow; if (!proposal || !run) throw new Error('Start a workflow first.'); if (proposal.action.type === 'navigate') await permission(proposal.action.url); if (workflow !== run) return; await execute(run); });
 task('continue', async () => { const run = workflow; if (!run) return; await listTabs().catch(() => {}); const acting = tabCache.find(t => t.id === run.actingTabId) || tabCache.find(t => t.active); if (acting) await permission(acting.url); else await permission(await activeUrl()); if (workflow !== run) return; $('continue').hidden = true; try { await next(run); } catch (e) { if (workflow === run) { $('loading').hidden = true; $('continue').hidden = false; } throw e; } });
 $('tabs-refresh').addEventListener('click', async () => { try { await listTabs(); } catch (e) { notify(e.message || 'Could not list tabs.', true); } });
 $('tabs-current').addEventListener('click', async () => { try { const [tab] = await chrome.tabs.query({ active: true, currentWindow: true }); if (!tab?.id) throw new Error('Select a webpage first.'); actingTabId = tab.id; contextIds = contextIds.filter(id => id !== tab.id); renderTabs(); await permission(tab.url); } catch (e) { notify(e.message || 'Something went wrong.', true); } });
@@ -173,7 +245,7 @@ $('worker').addEventListener('change', async () => { await chrome.storage.local.
   plan = session.plan;
   $('steps').textContent = '';
   if (session.goal) addMessage(session.goal, 'user');
-  for (const step of (session.steps || []).slice(-12)) { const row = document.createElement('p'); row.className = 'restored'; row.textContent = step; $('steps').append(row); }
+  for (const step of (session.steps || []).slice(-12)) { const row = document.createElement('p'); row.className = 'restored'; row.textContent = typeof step === 'string' ? step : `${step.type}${step.ok === false ? ' (failed)' : ''}: ${step.description || ''}`; $('steps').append(row); }
   renderPlan();
   if (plan.some(item => !item.done)) notify('Restored an earlier plan with unfinished steps. Clear it or send a new task.');
 })();
