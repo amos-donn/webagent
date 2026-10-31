@@ -112,18 +112,33 @@ async function shoot(tabId) {
     return { image: image.data, width: viewport.clientWidth, height: viewport.clientHeight };
   });
 }
+// The viewport legitimately changes between observing and acting (side panel opening, scrollbars, reflow),
+// so map the proposed point into the live viewport instead of refusing. Only a large resize needs a fresh look.
+async function viewportAfter(target, width, height) {
+  const metrics = await chrome.debugger.sendCommand(target, 'Page.getLayoutMetrics');
+  const view = metrics.cssVisualViewport || metrics.visualViewport;
+  const currentWidth = Math.round(view.clientWidth), currentHeight = Math.round(view.clientHeight);
+  const scaleX = currentWidth / width, scaleY = currentHeight / height;
+  if (Math.abs(scaleX - 1) > 0.25 || Math.abs(scaleY - 1) > 0.25) throw new Error('The page resized a lot since the screenshot. Observe it again.');
+  return { scaleX, scaleY, currentWidth, currentHeight };
+}
+function scalePoint(action, view) {
+  const x = Math.min(Math.max(Math.round(action.x * view.scaleX), 0), view.currentWidth - 1);
+  const y = Math.min(Math.max(Math.round(action.y * view.scaleY), 0), view.currentHeight - 1);
+  return { x, y };
+}
 async function clickType(tab, action, width, height) {
   return debug(tab.id, async target => {
-    const metrics = await chrome.debugger.sendCommand(target, 'Page.getLayoutMetrics'); const view = metrics.cssVisualViewport || metrics.visualViewport;
-    if (Math.abs(view.clientWidth - width) > 1 || Math.abs(view.clientHeight - height) > 1) throw new Error('The page viewport changed. Observe it again.');
+    const view = await viewportAfter(target, width, height);
+    const point = scalePoint(action, view);
     if (action.type === 'type') {
-      const check = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: (x,y) => { const e = document.elementFromPoint(x,y); return !!e && (e.tagName === 'TEXTAREA' || (e.tagName === 'INPUT' && ['text','search','email','url','tel'].includes(e.type)) || e.isContentEditable || e.getAttribute('role') === 'textbox') && !e.closest('form')?.querySelector('input[type=password]'); }, args: [action.x, action.y] });
+      const check = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: (x,y) => { const e = document.elementFromPoint(x,y); return !!e && (e.tagName === 'TEXTAREA' || (e.tagName === 'INPUT' && ['text','search','email','url','tel'].includes(e.type)) || e.isContentEditable || e.getAttribute('role') === 'textbox') && !e.closest('form')?.querySelector('input[type=password]'); }, args: [point.x, point.y] });
       if (!check[0].result) throw new Error('This is not an allowed text field. Password and login forms are blocked.');
     }
-    await chrome.debugger.sendCommand(target, 'Input.dispatchMouseEvent', { type: 'mousePressed', x: action.x, y: action.y, button: 'left', clickCount: 1 });
-    await chrome.debugger.sendCommand(target, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x: action.x, y: action.y, button: 'left', clickCount: 1 });
+    await chrome.debugger.sendCommand(target, 'Input.dispatchMouseEvent', { type: 'mousePressed', x: point.x, y: point.y, button: 'left', clickCount: 1 });
+    await chrome.debugger.sendCommand(target, 'Input.dispatchMouseEvent', { type: 'mouseReleased', x: point.x, y: point.y, button: 'left', clickCount: 1 });
     if (action.type === 'type') {
-      const focused = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: (x,y) => { const e = document.elementFromPoint(x,y); return !!e && (document.activeElement === e || e.contains(document.activeElement)) && (e.tagName === 'TEXTAREA' || (e.tagName === 'INPUT' && ['text','search','email','url','tel'].includes(e.type)) || e.isContentEditable || e.getAttribute('role') === 'textbox') && !e.closest('form')?.querySelector('input[type=password]'); }, args: [action.x, action.y] });
+      const focused = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: (x,y) => { const e = document.elementFromPoint(x,y); return !!e && (document.activeElement === e || e.contains(document.activeElement)) && (e.tagName === 'TEXTAREA' || (e.tagName === 'INPUT' && ['text','search','email','url','tel'].includes(e.type)) || e.isContentEditable || e.getAttribute('role') === 'textbox') && !e.closest('form')?.querySelector('input[type=password]'); }, args: [point.x, point.y] });
       if (!focused[0].result) throw new Error('The text field changed or could not be focused.');
       await chrome.debugger.sendCommand(target, 'Input.insertText', { text: action.text });
       if (action.submit) {

@@ -162,6 +162,14 @@ async function execute(run, elapsed) {
     result = await send('act', current);
   } catch (error) {
     if (workflow !== run) return;
+    // A page that moved or resized under the agent is normal, not a dead end: re-read it and try again.
+    if ((run.recovered || 0) < 2 && /viewport changed|page changed|resized|observe it again/i.test(error.message)) {
+      run.recovered = (run.recovered || 0) + 1;
+      currentAction(null); $('loading').hidden = true;
+      notify('The page shifted while the agent was deciding. Re-reading it and trying again.');
+      try { await next(run); } catch (retryError) { if (workflow === run) { $('loading').hidden = true; $('continue').hidden = false; notify(retryError.message || 'Could not read the page.', true); } }
+      return;
+    }
     run.steps.push({ type: current.action.type, description: current.action.description || '', ok: false, note: error.message, page: current.url });
     addStep(current.action, current.url, {}, 0, error.message);
     saveSession(run); currentAction(null);
@@ -173,7 +181,7 @@ async function execute(run, elapsed) {
   const a = current.action;
   const note = a.type === 'read' && result?.text ? `page excerpt: ${String(result.text).slice(0, 1500)}` : '';
   run.steps.push({ type: a.type, description: a.description || '', ok: true, page: current.url, note, x: current.action.x, y: current.action.y, url: a.url, direction: a.direction, text: a.type === 'type' ? a.text : undefined });
-  run.lastHash = ''; run.stalled = 0;
+  run.lastHash = ''; run.stalled = 0; run.recovered = 0;
   addStep(a, current.url, result, elapsed); currentAction(null); saveSession(run);
   if (run.auto) { loading('Waiting for the page', '◌'); await new Promise(resolve => setTimeout(resolve, 900)); if (workflow === run) await next(run); }
   else { $('loading').hidden = true; $('continue').hidden = false; notify('Action completed. Continue when the page has settled.'); }
