@@ -193,3 +193,14 @@ test('over-long batches and batched navigation are rejected', async () => {
     assert.match((await response.json()).error, /cannot be batched/);
   } finally { nav.restore(); }
 });
+
+test('the planner may skip the checklist for a short task', async () => {
+  const mock = scripted([{ steps: [] }]);
+  try {
+    const response = await worker.fetch(request({ goal:'Summarize this page', url:'https://example.com/' }, '/plan'), { DB:db, OPENROUTER_API_KEY:'test-key' });
+    assert.equal(response.status, 200);
+    const out = await response.json();
+    assert.deepEqual(out.todos, []);
+    assert.equal(out.skipped, true);
+  } finally { mock.restore(); }
+});

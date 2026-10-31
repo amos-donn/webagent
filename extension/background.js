@@ -290,6 +290,16 @@ async function handle(message) {
     const tabs = await chrome.tabs.query({ currentWindow: true });
     return { tabs: tabs.filter(t => t.id && t.url).map(t => ({ id: t.id, title: t.title || t.url, url: t.url, active: !!t.active, audible: !!t.audible, supported: permitted(t.url) })) };
   }
+  if (message.type === 'group') {
+    // Collect the tab the agent works in, the same way Claude in Chrome groups the tabs it drives.
+    try {
+      const existing = await chrome.tabs.get(message.tabId);
+      if (existing.groupId > 0) return { groupId: existing.groupId };
+      const groupId = await chrome.tabs.group({ tabIds: [message.tabId] });
+      await chrome.tabGroups.update(groupId, { title: 'webagent', color: 'blue' }).catch(() => {});
+      return { groupId };
+    } catch { return {}; }
+  }
   if (message.type === 'context') {
     const tab = await getTab(message.tabId);
     if (!permitted(tab.url)) throw new Error('That page is not supported. Chrome internal pages are not supported.');

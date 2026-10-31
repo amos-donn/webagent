@@ -1,70 +1,23 @@
 const $ = id => document.getElementById(id);
-let workflow = null, proposal = null, plan = [], actingTabId = null, tabCache = [], contextIds = [];
 const ICONS = { think:'💭', click:'⌖', type:'⌨', read:'📖', scroll:'↕', wait:'⏳', navigate:'↗', key:'⏎' };
 const LABELS = { think:'Thinking through', click:'Clicking', type:'Typing', read:'Reading page', scroll:'Scrolling', wait:'Waiting', navigate:'Navigating', key:'Pressing key' };
 const CONTINUE = 'Continue to next step ↗';
 const STEP_LIMIT = 60;
+const MAX_CHATS = 20;
+const MAX_MESSAGES = 400;
+const RISK = /\b(buy|purchase|pay|checkout|order now|subscribe|delete|remove|archive|send|submit|post|publish|share|upload|transfer|confirm|book|reserve|invite|unsubscribe|sign out|log out)\b/i;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+let workflow = null, proposal = null, plan = [], chats = [], chat = null;
+let tabCache = [], actingTabId = null, contextIds = [];
+let mode = 'autopilot', planMode = 'auto', lastShot = '';
+
 function notify(text, error = false) { $('notice').textContent = text; $('notice').classList.toggle('error', error); $('notice').hidden = false; }
+function setStatus(text) { $('status').textContent = text || ''; $('status').hidden = !text; }
 function baseUrl() { const url = new URL($('worker').value.trim()); if (url.username || url.password || url.search || url.hash || (url.protocol !== 'https:' && !(url.protocol === 'http:' && ['localhost','127.0.0.1'].includes(url.hostname)))) throw new Error('Use an HTTPS Worker URL or localhost.'); return url.origin + url.pathname.replace(/\/$/, ''); }
 function originPattern(value) { const u = new URL(value); if (u.protocol !== 'https:' && !(u.protocol === 'http:' && ['localhost','127.0.0.1'].includes(u.hostname))) throw new Error('Only HTTPS and local pages are supported.'); return `${u.protocol}//${u.hostname}/*`; }
 async function permission(value) { const origins = [originPattern(value)]; if (!await chrome.permissions.contains({ origins }) && !await chrome.permissions.request({ origins })) throw new Error('Site access was not granted.'); }
 async function activeUrl() { const [tab] = await chrome.tabs.query({ active: true, currentWindow: true }); if (!tab?.url) throw new Error('Select a webpage first.'); return tab.url; }
-async function listTabs() { const { tabs } = await send('tabs'); tabCache = tabs; const ids = new Set(tabs.map(t => t.id)); if (!ids.has(actingTabId)) actingTabId = (tabs.find(t => t.active) || tabs[0])?.id ?? null; contextIds = contextIds.filter(id => ids.has(id) && id !== actingTabId); renderTabs(); return tabs; }
-function shortTitle(t) { const s = (t.title || t.url).trim(); return s.length > 60 ? s.slice(0, 60) + '…' : s; }
-function renderTabs() {
-  const box = $('tab-list'); box.textContent = '';
-  if (!tabCache.length) { box.textContent = 'No tabs found.'; }
-  for (const t of tabCache) {
-    const row = document.createElement('div'); row.className = 'tab-row' + (t.id === actingTabId ? ' acting' : '');
-    const act = document.createElement('button'); act.type = 'button'; act.className = 'tab-btn' + (t.id === actingTabId ? ' on' : ''); act.textContent = '★'; act.title = 'Act in this tab'; act.setAttribute('aria-label', `Act in ${shortTitle(t)}`);
-    act.addEventListener('click', async () => { actingTabId = t.id; contextIds = contextIds.filter(id => id !== t.id); renderTabs(); try { await permission(t.url); } catch (e) { notify(e.message || 'Site access was not granted.', true); } });
-    const ctx = document.createElement('button'); ctx.type = 'button'; ctx.className = 'tab-btn' + (contextIds.includes(t.id) ? ' on' : ''); ctx.textContent = '+'; ctx.title = 'Include as read-only context'; ctx.setAttribute('aria-label', `Include ${shortTitle(t)} as context`);
-    ctx.addEventListener('click', async () => {
-      if (t.id === actingTabId) return;
-      contextIds = contextIds.includes(t.id) ? contextIds.filter(id => id !== t.id) : [...contextIds, t.id].slice(0, 5);
-      renderTabs();
-      if (contextIds.includes(t.id)) { try { await permission(t.url); } catch (e) { notify(e.message || 'Site access was not granted.', true); } }
-    });
-    const label = document.createElement('span'); label.className = 'tab-label'; label.textContent = shortTitle(t); label.title = t.url;
-    if (!t.supported) { const tag = document.createElement('span'); tag.className = 'tab-tag'; tag.textContent = 'unsupported'; label.append(' ', tag); }
-    row.append(act, ctx, label); box.append(row);
-  }
-  const acting = tabCache.find(t => t.id === actingTabId);
-  $('tabs-label').textContent = acting ? `★ ${shortTitle(acting)}${contextIds.length ? ` · +${contextIds.length} context` : ''}` : 'No tab selected';
-}
-function renderPlan() {
-  const box = $('plan-box'), list = $('plan-list');
-  if (!plan.length) { box.hidden = true; return; }
-  box.hidden = false;
-  list.textContent = '';
-  const done = plan.filter(t => t.done).length;
-  $('plan-label').textContent = workflow ? 'PLAN' : 'PREVIOUS PLAN';
-  $('plan-progress').textContent = `${done}/${plan.length} done`;
-  $('plan-clear').hidden = !!workflow;
-  for (const item of plan) {
-    const li = document.createElement('li'); li.className = 'plan-item' + (item.done ? ' done' : '');
-    // The tick is a button: the user can correct a step the agent ticked without evidence.
-    const mark = document.createElement('button'); mark.type = 'button'; mark.className = 'plan-mark'; mark.textContent = item.done ? '✓' : '○';
-    mark.title = item.done ? 'Mark as not done' : 'Mark as done';
-    mark.setAttribute('aria-label', `${mark.title}: ${item.title}`);
-    mark.addEventListener('click', () => { item.done = !item.done; renderPlan(); if (workflow) saveSession(workflow); });
-    const text = document.createElement('span'); text.textContent = item.title;
-    li.append(mark, text); list.append(li);
-  }
-}
-function saveSession(run) { chrome.storage.local.set({ session: { goal: run.goal, plan, steps: run.steps, at: Date.now() } }).catch(() => {}); }
-// A plan item may only be ticked after an action was verified to change the page in this run.
-function applyCompleted(run, ids = []) {
-  if (!run || !ids.length) return false;
-  if (!(run.evidence > 0)) { run.unproven = (run.unproven || 0) + ids.length; return false; }
-  const fresh = plan.filter(item => !item.done && ids.includes(item.id));
-  if (!fresh.length) return false;
-  for (const item of fresh) item.done = true;
-  run.evidence = 0;
-  renderPlan();
-  return true;
-}
+async function send(type, data = {}) { const out = await chrome.runtime.sendMessage({ type, ...data }); if (out.error) throw new Error(out.error); return out.data; }
 async function api(path, data, retries = 2) {
   const base = baseUrl();
   let lastError = new Error('Request failed.');
@@ -84,29 +37,220 @@ async function api(path, data, retries = 2) {
   }
   throw lastError;
 }
-async function send(type, data = {}) { const out = await chrome.runtime.sendMessage({ type, ...data }); if (out.error) throw new Error(out.error); return out.data; }
 function task(id, fn) { $(id).addEventListener('click', async () => { $(id).disabled = true; try { await fn(); } catch (e) { notify(e.message || 'Something went wrong.', true); } finally { $(id).disabled = false; } }); }
-function stop() { workflow = null; proposal = null; currentAction(null); $('approval').hidden = true; $('continue').hidden = true; $('stop').hidden = true; $('start').hidden = false; $('goal').disabled = false; $('full-access').disabled = false; $('loading').hidden = true; $('continue').textContent = CONTINUE; renderPlan(); }
-function loading(label, icon) { $('loading-label').textContent = label; $('loading-icon').textContent = icon; $('loading').hidden = false; }
-function addMessage(text, kind = 'agent') { const el = document.createElement('div'); el.className = `message ${kind}`; el.textContent = text; $('steps').append(el); el.scrollIntoView({ behavior:'smooth', block:'nearest' }); }
-function currentAction(label) { const el = $('current-action'); if (!label) { if (el) el.remove(); return; } if (el) { el.textContent = `● ${label}`; } else { const row = document.createElement('div'); row.id = 'current-action'; row.className = 'message current'; row.textContent = `● ${label}`; $('steps').append(row); } $('current-action').scrollIntoView({ behavior:'smooth', block:'nearest' }); }
-function addStep(action, url, result, elapsed, failure, meta = {}) {
-  const details = document.createElement('details'); details.className = 'activity' + (failure ? ' failed' : '');
-  const summary = document.createElement('summary');
-  const badges = `${failure ? ' · failed' : meta.changed === false ? ' · no visible change' : ''}${meta.fallback ? ' · retried with a scripted click' : ''}`;
-  summary.textContent = `${ICONS[action.type] || '✳'}  ${action.type.charAt(0).toUpperCase() + action.type.slice(1)}${elapsed ? ` · ${(elapsed / 1000).toFixed(1)}s` : ''}${badges}`;
-  const thought = document.createElement('p'); thought.textContent = action.description || 'Action completed.';
-  const page = document.createElement('p'); page.className = 'page-url'; page.textContent = `Webpage: ${url}`;
-  details.append(summary, thought, page);
-  if (failure) { const error = document.createElement('p'); error.className = 'step-error'; error.textContent = failure; details.append(error); details.open = true; }
-  if (action.type === 'type') { const text = document.createElement('p'); text.textContent = `Text: ${action.text}${action.submit ? ' (then Enter)' : ''}`; details.append(text); }
-  if (action.type === 'navigate') { const dest = document.createElement('p'); dest.textContent = `Destination: ${action.url}`; details.append(dest); }
-  if (action.type === 'key') { const key = document.createElement('p'); key.textContent = `Key: ${action.key}`; details.append(key); }
-  if (action.type === 'wait') { const wait = document.createElement('p'); wait.textContent = `Wait: ${action.seconds}s`; details.append(wait); }
-  if (action.type === 'read' && result?.text) { const excerpt = document.createElement('p'); excerpt.textContent = `Read ${result.title || 'page'}: ${String(result.text).slice(0, 500)}`; details.append(excerpt); }
-  $('steps').append(details); details.scrollIntoView({ behavior:'smooth', block:'nearest' });
+
+/* ---------- tabs ---------- */
+async function listTabs() { const { tabs } = await send('tabs'); tabCache = tabs; const ids = new Set(tabs.map(t => t.id)); if (!ids.has(actingTabId)) actingTabId = (tabs.find(t => t.active) || tabs[0])?.id ?? null; contextIds = contextIds.filter(id => ids.has(id) && id !== actingTabId); renderTabs(); return tabs; }
+function shortTitle(t) { const s = (t.title || t.url).trim(); return s.length > 60 ? s.slice(0, 60) + '…' : s; }
+function renderTabs() {
+  const box = $('tab-list'); box.textContent = '';
+  if (!tabCache.length) box.textContent = 'No tabs found.';
+  for (const t of tabCache) {
+    const row = document.createElement('div'); row.className = 'tab-row' + (t.id === actingTabId ? ' acting' : '');
+    const act = document.createElement('button'); act.type = 'button'; act.className = 'tab-btn' + (t.id === actingTabId ? ' on' : ''); act.textContent = '★'; act.title = 'Act in this tab'; act.setAttribute('aria-label', `Act in ${shortTitle(t)}`);
+    act.addEventListener('click', async () => { actingTabId = t.id; contextIds = contextIds.filter(id => id !== t.id); renderTabs(); try { await permission(t.url); } catch (e) { notify(e.message || 'Site access was not granted.', true); } });
+    const ctx = document.createElement('button'); ctx.type = 'button'; ctx.className = 'tab-btn' + (contextIds.includes(t.id) ? ' on' : ''); ctx.textContent = '+'; ctx.title = 'Include as read-only context'; ctx.setAttribute('aria-label', `Include ${shortTitle(t)} as context`);
+    ctx.addEventListener('click', async () => { if (t.id === actingTabId) return; contextIds = contextIds.includes(t.id) ? contextIds.filter(id => id !== t.id) : [...contextIds, t.id].slice(0, 5); renderTabs(); if (contextIds.includes(t.id)) { try { await permission(t.url); } catch (e) { notify(e.message || 'Site access was not granted.', true); } } });
+    const label = document.createElement('span'); label.className = 'tab-label'; label.textContent = shortTitle(t); label.title = t.url;
+    if (!t.supported) { const tag = document.createElement('span'); tag.className = 'tab-tag'; tag.textContent = 'unsupported'; label.append(' ', tag); }
+    row.append(act, ctx, label); box.append(row);
+  }
+  const acting = tabCache.find(t => t.id === actingTabId);
+  $('tabs-label').textContent = acting ? `★ ${shortTitle(acting)}${contextIds.length ? ` · +${contextIds.length} context` : ''}` : 'No tab selected';
+}
+
+/* ---------- chats ---------- */
+function newChatRecord() { return { id: crypto.randomUUID(), title: 'New chat', goal: '', messages: [], plan: [], steps: [], at: Date.now() }; }
+async function persist() {
+  if (!chat) return;
+  chat.plan = plan;
+  chat.messages = chat.messages.slice(-MAX_MESSAGES);
+  if (workflow) chat.steps = workflow.steps;
+  chat.at = Date.now();
+  const index = chats.findIndex(item => item.id === chat.id);
+  if (index === -1) chats.unshift(chat); else chats[index] = chat;
+  chats = chats.slice(0, MAX_CHATS);
+  await chrome.storage.local.set({ chats, activeChat: chat.id });
+}
+function welcome() {
+  const box = document.createElement('div'); box.className = 'welcome';
+  const icon = document.createElement('span'); icon.className = 'welcome-icon'; icon.textContent = '✳';
+  const body = document.createElement('div');
+  const strong = document.createElement('strong'); strong.textContent = 'Ready.';
+  const p = document.createElement('p'); p.textContent = "Type a task and I'll use the starred tab, plan only when it helps, act on my own, and tick steps off only once they actually change the page. Type / for commands or @ to add another tab as context.";
+  body.append(strong, p); box.append(icon, body);
+  return box;
+}
+function renderMessage(message) {
+  if (message.role === 'activity') {
+    const details = document.createElement('details'); details.className = 'activity' + (message.failure ? ' failed' : '');
+    const summary = document.createElement('summary');
+    const badges = `${message.failure ? ' · failed' : message.changed === false ? ' · no visible change' : ''}${message.fallback ? ' · retried with a scripted click' : ''}`;
+    summary.textContent = `${ICONS[message.type] || '✳'}  ${String(message.type || 'step').charAt(0).toUpperCase() + String(message.type || 'step').slice(1)}${message.elapsed ? ` · ${(message.elapsed / 1000).toFixed(1)}s` : ''}${badges}`;
+    const thought = document.createElement('p'); thought.textContent = message.text || 'Action completed.';
+    details.append(summary, thought);
+    if (message.page) { const page = document.createElement('p'); page.className = 'page-url'; page.textContent = `Webpage: ${message.page}`; details.append(page); }
+    if (message.failure) { const error = document.createElement('p'); error.className = 'step-error'; error.textContent = message.failure; details.append(error); details.open = true; }
+    if (message.input) { const text = document.createElement('p'); text.textContent = `Text: ${message.input}${message.submit ? ' (then Enter)' : ''}`; details.append(text); }
+    if (message.destination) { const dest = document.createElement('p'); dest.textContent = `Destination: ${message.destination}`; details.append(dest); }
+    if (message.excerpt) { const excerpt = document.createElement('p'); excerpt.textContent = `Read: ${message.excerpt}`; details.append(excerpt); }
+    return details;
+  }
+  const el = document.createElement('div');
+  el.className = `message ${message.role}`;
+  el.textContent = message.text;
+  return el;
+}
+function renderChat() {
+  const box = $('steps'); box.textContent = '';
+  if (!chat.messages.length) { box.append(welcome()); return; }
+  for (const message of chat.messages) box.append(renderMessage(message));
+  box.scrollTop = box.scrollHeight;
+}
+function pushMessage(role, text, extra = {}) {
+  if (!chat) return;
+  const message = { role, text, at: Date.now(), ...extra };
+  chat.messages.push(message);
+  $('steps').querySelector('.welcome')?.remove();
+  const el = renderMessage(message);
+  $('steps').append(el);
+  el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  persist().catch(() => {});
+}
+function renderPlan() {
+  const box = $('plan-box'), list = $('plan-list');
+  if (!plan.length) { box.hidden = true; return; }
+  box.hidden = false;
+  list.textContent = '';
+  const done = plan.filter(item => item.done).length;
+  $('plan-label').textContent = workflow ? 'PLAN' : 'PREVIOUS PLAN';
+  $('plan-progress').textContent = `${done}/${plan.length} done`;
+  $('plan-clear').hidden = !!workflow;
+  for (const item of plan) {
+    const li = document.createElement('li'); li.className = 'plan-item' + (item.done ? ' done' : '');
+    const mark = document.createElement('button'); mark.type = 'button'; mark.className = 'plan-mark'; mark.textContent = item.done ? '✓' : '○';
+    mark.title = item.done ? 'Mark as not done' : 'Mark as done';
+    mark.setAttribute('aria-label', `${mark.title}: ${item.title}`);
+    mark.addEventListener('click', () => { item.done = !item.done; renderPlan(); persist().catch(() => {}); });
+    const text = document.createElement('span'); text.textContent = item.title;
+    li.append(mark, text); list.append(li);
+  }
+}
+function applyCompleted(run, ids = []) {
+  if (!run || !ids.length) return false;
+  if (!(run.evidence > 0)) { run.unproven = (run.unproven || 0) + ids.length; return false; }
+  const fresh = plan.filter(item => !item.done && ids.includes(item.id));
+  if (!fresh.length) return false;
+  for (const item of fresh) item.done = true;
+  run.evidence = 0;
+  renderPlan();
+  return true;
+}
+async function newChat() {
+  if (workflow) stop();
+  chat = newChatRecord();
+  plan = [];
+  chats.unshift(chat);
+  $('steps').textContent = '';
+  $('steps').append(welcome());
+  $('plan-box').hidden = true;
+  $('notice').hidden = true;
+  proposal = null; $('approval').hidden = true;
+  await persist();
+  notify('New chat started.');
+}
+function openChat(id) {
+  const target = chats.find(item => item.id === id);
+  if (!target) return;
+  if (workflow) stop();
+  chat = target; plan = chat.plan || [];
+  renderChat(); renderPlan(); persist().catch(() => {});
+  if (plan.some(item => !item.done)) notify('Restored a chat with unfinished steps. Send a message to keep going.');
+}
+function renderHistory() {
+  const list = $('history-list'); list.textContent = '';
+  if (!chats.length) { list.textContent = 'No chats yet.'; return; }
+  for (const item of chats) {
+    const row = document.createElement('div'); row.className = 'history-row' + (chat && item.id === chat.id ? ' current' : '');
+    const button = document.createElement('button'); button.type = 'button'; button.className = 'history-open';
+    const title = document.createElement('strong'); title.textContent = item.title || 'Untitled chat';
+    const meta = document.createElement('span'); meta.className = 'history-time'; meta.textContent = `${new Date(item.at || Date.now()).toLocaleString()} · ${item.messages?.length || 0} messages`;
+    button.append(title, meta);
+    button.addEventListener('click', () => { $('history-dialog').close(); openChat(item.id); });
+    row.append(button); list.append(row);
+  }
+}
+function download(name, text) {
+  const blob = new Blob([text], { type: 'text/markdown' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url; link.download = name;
+  document.body.append(link); link.click(); link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
+}
+function markdown(target) {
+  const lines = [`# ${target.title || 'Webagent chat'}`, '', `Goal: ${target.goal || '(none)'}`, `Started: ${new Date(target.at || Date.now()).toLocaleString()}`, ''];
+  if (target.plan?.length) {
+    lines.push('## Plan', '');
+    for (const item of target.plan) lines.push(`- [${item.done ? 'x' : ' '}] ${item.title}`);
+    lines.push('');
+  }
+  lines.push('## Transcript', '');
+  for (const message of target.messages || []) {
+    if (message.role === 'activity') {
+      const badges = `${message.failure ? ' (failed)' : message.changed === false ? ' (no visible change)' : ''}`;
+      lines.push(`- ${message.type}${badges}: ${message.text}${message.page ? ` — ${message.page}` : ''}`);
+    } else if (message.role === 'note') lines.push(`> ${message.text}`);
+    else lines.push(`**${message.role === 'user' ? 'You' : 'Webagent'}:** ${message.text}`, '');
+  }
+  return lines.join('\n');
+}
+function exportChat() {
+  const target = chat;
+  if (!target) return;
+  download(`webagent-${(target.title || 'chat').toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 40)}.md`, markdown(target));
+  notify('Exported this chat as Markdown.');
+}
+
+/* ---------- workflow ---------- */
+function stop() {
+  workflow = null; proposal = null; currentAction(null);
+  $('approval').hidden = true; $('continue').hidden = true; $('stop').hidden = true; $('start').hidden = false;
+  $('goal').disabled = false; $('mode').disabled = false; $('loading').hidden = true; $('continue').textContent = CONTINUE;
+  setStatus('');
+  renderPlan(); persist().catch(() => {});
+}
+function loading(label, icon) { $('loading-label').textContent = label; $('loading-icon').textContent = icon; $('loading').hidden = false; setStatus(label); }
+function currentAction(label) {
+  const existing = $('current-action');
+  if (!label) { existing?.remove(); return; }
+  if (existing) existing.textContent = `● ${label}`;
+  else { const row = document.createElement('div'); row.id = 'current-action'; row.className = 'message current'; row.textContent = `● ${label}`; $('steps').append(row); }
+  $('current-action').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+function recordActivity(action, url, result, elapsed, failure, meta = {}) {
+  if (!chat) return;
+  const message = {
+    role: 'activity', type: action.type, text: action.description || '',
+    elapsed: elapsed || 0, failure: failure || '', changed: meta.changed, fallback: meta.fallback, page: url,
+    input: action.type === 'type' ? action.text : undefined, submit: action.submit,
+    destination: action.type === 'navigate' ? action.url : undefined,
+    excerpt: action.type === 'read' ? String(result?.text || '').slice(0, 400) : undefined
+  };
+  chat.messages.push({ ...message, at: Date.now() });
+  $('steps').querySelector('.welcome')?.remove();
+  const el = renderMessage(message);
+  $('steps').append(el);
+  el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  persist().catch(() => {});
 }
 function textHash(text) { const value = String(text || ''); let hash = 0; for (let i = 0; i < value.length; i += 5) hash = (hash * 31 + value.charCodeAt(i)) | 0; return `${value.length}:${hash}`; }
+function riskyAction(action) {
+  if (action.type === 'type' && /password|passcode|card number|cvv|ssn|iban|passport/i.test(action.text || '')) return 'typing sensitive-looking data';
+  const text = `${action.description || ''} ${action.text || ''}`;
+  const hit = text.match(RISK);
+  return hit ? `“${(action.description || action.text || action.type).slice(0, 60)}” looks irreversible` : '';
+}
 function describe(action, queued) {
   const extra = [
     action.type === 'type' ? `\nText: ${action.text}${action.submit ? ' (then Enter)' : ''}` : '',
@@ -119,7 +263,6 @@ function describe(action, queued) {
   return `${action.type.toUpperCase()}: ${action.description || 'Review the proposed action.'}${extra}`;
 }
 function showProposal(run, action, queued, quiet = false) {
-  const image = $('screenshot');
   proposal = { tabId: run.view.tabId, url: run.view.url, width: run.view.width, height: run.view.height, action: { ...action } };
   const coordinate = ['click', 'type'].includes(action.type);
   $('marker').hidden = !coordinate;
@@ -129,14 +272,14 @@ function showProposal(run, action, queued, quiet = false) {
     proposal.action.x = action.x / run.view.naturalWidth * run.view.width;
     proposal.action.y = action.y / run.view.naturalHeight * run.view.height;
   }
-  if (!image.naturalWidth) $('marker').hidden = true;
   $('proposal').textContent = describe(action, queued);
   if (!quiet) { $('approval').hidden = false; $('loading').hidden = true; }
   return proposal;
 }
+
 async function next(run, prefetched) {
   if (workflow !== run) return;
-  if (run.steps.length >= STEP_LIMIT) { addMessage(`Stopped at the ${STEP_LIMIT}-action limit. Start a new task to keep going.`); stop(); return; }
+  if (run.steps.length >= STEP_LIMIT) { pushMessage('note', `Stopped at the ${STEP_LIMIT}-action limit. Start a new chat to keep going.`); stop(); return; }
   $('continue').textContent = CONTINUE;
   await listTabs().catch(() => {});
   const acting = tabCache.find(t => t.id === run.actingTabId) || tabCache.find(t => t.active) || tabCache[0];
@@ -146,7 +289,7 @@ async function next(run, prefetched) {
   const contexts = tabCache.filter(t => run.contextIds.includes(t.id) && t.id !== acting.id && t.supported).slice(0, 5);
   for (const t of [acting, ...contexts]) {
     if (!await chrome.permissions.contains({ origins:[originPattern(t.url)] })) {
-      if (run.auto) { $('continue').hidden = false; $('loading').hidden = true; notify(`“${shortTitle(t)}” needs site access. Select Continue to grant permission.`); return; }
+      if (run.mode !== 'manual') { $('continue').hidden = false; $('loading').hidden = true; setStatus(''); notify(`“${shortTitle(t)}” needs site access. Select Continue to grant permission.`); return; }
       await permission(t.url); if (workflow !== run) return;
     }
   }
@@ -155,48 +298,53 @@ async function next(run, prefetched) {
   const hash = textHash(shot.text);
   run.stalled = hash === run.lastHash ? (run.stalled || 0) + 1 : 0;
   run.lastHash = hash;
-  // Context tabs are independent reads, so fetch them together instead of one after another.
   const extra = (await Promise.all(contexts.map(t => send('context', { tabId: t.id }).then(c => c.text ? { url: c.url, title: c.title, text: c.text.slice(0, 4000) } : null).catch(() => null)))).filter(Boolean);
   const image = $('screenshot'); image.src = `data:image/jpeg;base64,${shot.image}`; await image.decode();
+  lastShot = `data:image/jpeg;base64,${shot.image}`;
+  $('saw-image').src = lastShot; $('saw-btn').hidden = false;
+  chrome.storage.local.set({ lastShot }).catch(() => {});
   const scale = image.naturalWidth / shot.width;
   const elements = (shot.elements || []).map(el => ({ role: el.role, name: el.name, x: Math.round(el.x * scale), y: Math.round(el.y * scale), off: el.off, state: el.state }));
   run.view = { tabId: shot.tabId, url: shot.url, width: shot.width, height: shot.height, naturalWidth: image.naturalWidth, naturalHeight: image.naturalHeight };
-  const done = plan.filter(t => t.done).length;
+  const done = plan.filter(item => item.done).length;
   loading(plan.length ? `Thinking · ${done}/${plan.length} plan steps · action ${run.steps.length + 1}/${STEP_LIMIT}` : `Thinking about action ${run.steps.length + 1}`, '✳');
   const started = performance.now();
-  const { actions, action, completed, incomplete, ms } = await api('/agent', { goal:run.goal, todos:plan, steps:run.steps, url:shot.url, title:shot.title, text:shot.text, image:shot.image, width:image.naturalWidth, height:image.naturalHeight, elements, stalled:run.stalled, automatic:run.auto, contexts:extra });
+  const { actions, action, completed, incomplete, ms } = await api('/agent', { goal:run.goal, todos:plan, steps:run.steps, url:shot.url, title:shot.title, text:shot.text, image:shot.image, width:image.naturalWidth, height:image.naturalHeight, elements, stalled:run.stalled, automatic:run.mode === 'autopilot', contexts:extra });
   const elapsed = ms ?? Math.round(performance.now() - started);
   if (workflow !== run) return;
-  const ticked = applyCompleted(run, completed);
-  if (run.unproven) { addMessage(`${run.unproven} plan step${run.unproven === 1 ? '' : 's'} were claimed done without a verified action, so the tick waits until the work is proven.`); run.unproven = 0; }
-  if (ticked) saveSession(run);
-  // An older Worker only returns "action"; both shapes work here.
+  if (applyCompleted(run, completed)) persist().catch(() => {});
+  if (run.unproven) { pushMessage('note', `${run.unproven} plan step${run.unproven === 1 ? '' : 's'} were claimed done without a verified action, so the tick waits until the work is proven.`); run.unproven = 0; }
   const batch = Array.isArray(actions) && actions.length ? actions : (action ? [action] : []);
-  const finish = batch.find(a => a.type === 'done');
+  const finish = batch.find(item => item.type === 'done');
   if (finish) {
-    addMessage(finish.summary || 'Workflow complete.');
-    saveSession(run);
+    pushMessage('agent', finish.summary || 'Workflow complete.');
     if (incomplete?.length) {
-      const titles = plan.filter(t => incomplete.includes(t.id)).map(t => t.title);
-      $('loading').hidden = true; $('approval').hidden = true;
+      const titles = plan.filter(item => incomplete.includes(item.id)).map(item => item.title);
+      $('loading').hidden = true; $('approval').hidden = true; setStatus('');
       $('continue').hidden = false; $('stop').hidden = false; $('continue').textContent = 'Keep working on the plan ↗';
       notify(`Proposed finishing with ${titles.length} unchecked plan step${titles.length === 1 ? '' : 's'}: ${titles.join(' · ')}. Keep working, or Stop.`);
       return;
     }
-    stop(); notify('Workflow complete.'); return;
+    const run_ = run; stop(); notify('Workflow complete.'); return run_;
   }
   run.queue = batch.slice();
-  showProposal(run, run.queue[0], run.queue.length - 1);
-  if (run.auto) { $('approval').hidden = true; await runBatch(run); }
-  else notify(`Review the queued action${run.queue.length > 1 ? ` (${run.queue.length} queued)` : ''} before it runs.`);
+  const risky = run.queue.map(riskyAction).find(Boolean) || '';
+  showProposal(run, run.queue[0], run.queue.length - 1, run.mode === 'autopilot' || (run.mode === 'auto' && !risky));
+  if (run.mode === 'autopilot' || (run.mode === 'auto' && !risky)) {
+    $('approval').hidden = true;
+    if (risky) pushMessage('note', `Auto mode paused this step because ${risky}.`);
+    await runBatch(run);
+  } else {
+    $('approval').hidden = false; $('loading').hidden = true; setStatus('Waiting for you');
+    notify(risky ? `Paused before this round because ${risky}. Approve to continue.` : 'Review the queued actions before they run.');
+  }
 }
-// Runs the queued actions back to back, then re-observes once for the next round.
 async function runBatch(run) {
   while (run.queue.length && workflow === run) {
     const action = run.queue.shift();
     const outcome = await executeOne(run, showProposal(run, action, run.queue.length, true));
     if (outcome === 'recover') { await sleep(300); if (workflow === run) await safeNext(run); return; }
-    if (outcome !== 'ok') { $('loading').hidden = true; $('continue').hidden = false; $('stop').hidden = false; return; }
+    if (outcome !== 'ok') { $('loading').hidden = true; $('continue').hidden = false; $('stop').hidden = false; setStatus(''); return; }
     if (run.queue.length) { loading('Next queued action', '◌'); await sleep(220); }
   }
   if (workflow !== run) return;
@@ -206,23 +354,22 @@ async function runBatch(run) {
   await safeNext(run);
 }
 async function safeNext(run) {
-  try { await next(run); } catch (e) { if (workflow === run) { $('loading').hidden = true; $('continue').hidden = false; notify(e.message || 'Could not continue. Select Continue to retry.', true); } }
+  try { await next(run); } catch (e) { if (workflow === run) { $('loading').hidden = true; $('continue').hidden = false; setStatus(''); notify(e.message || 'Could not continue. Select Continue to retry.', true); } }
 }
 async function executeOne(run, current) {
   if (!current || workflow !== run) return 'stop';
-  const a = current.action;
-  loading(LABELS[a.type] || 'Working', ICONS[a.type] || '✳');
-  currentAction(`Doing ${a.type.toUpperCase()}: ${a.description || ''}`);
+  const action = current.action;
+  loading(LABELS[action.type] || 'Working', ICONS[action.type] || '✳');
+  currentAction(`Doing ${action.type.toUpperCase()}: ${action.description || ''}`);
   proposal = null;
   let result;
   try { result = await send('act', current); }
   catch (error) {
     if (workflow !== run) return 'stop';
-    // A page that moved under the agent is normal: re-read it and try again before giving up.
     if (/viewport changed|page changed|resized|observe it again/i.test(error.message) && (run.recovered || 0) < 2) { run.recovered = (run.recovered || 0) + 1; notify('The page shifted while acting. Re-reading it and trying again.'); return 'recover'; }
-    run.steps.push({ type: a.type, description: a.description || '', ok: false, changed: false, note: error.message, page: current.url });
-    addStep(a, current.url, {}, 0, error.message);
-    saveSession(run); currentAction(null);
+    run.steps.push({ type: action.type, description: action.description || '', ok: false, changed: false, note: error.message, page: current.url });
+    recordActivity(action, current.url, {}, 0, error.message);
+    currentAction(null);
     notify(`${error.message} The agent will try a different approach when you continue.`, true);
     return 'failed';
   }
@@ -231,46 +378,87 @@ async function executeOne(run, current) {
   const changed = verified !== false;
   if (changed) { run.evidence = (run.evidence || 0) + 1; run.stalled = 0; run.recovered = 0; run.lastHash = ''; }
   else run.stalled = (run.stalled || 0) + 1;
-  const note = a.type === 'read' && result?.text ? `page excerpt: ${String(result.text).slice(0, 1500)}` : '';
-  run.steps.push({ type: a.type, description: a.description || '', ok: true, changed, page: current.url, note, x: current.action.x, y: current.action.y, url: a.url, direction: a.direction, text: a.type === 'type' ? a.text : undefined });
-  addStep(a, current.url, result, 0, null, { changed, fallback: !!result?.fallback });
-  currentAction(null); saveSession(run);
+  const note = action.type === 'read' && result?.text ? `page excerpt: ${String(result.text).slice(0, 1500)}` : '';
+  run.steps.push({ type: action.type, description: action.description || '', ok: true, changed, page: current.url, note, x: current.action.x, y: current.action.y, url: action.url, direction: action.direction, text: action.type === 'type' ? action.text : undefined });
+  recordActivity(action, current.url, result, 0, null, { changed, fallback: !!result?.fallback });
+  currentAction(null);
   return 'ok';
 }
-async function startWorkflow(goal, auto) {
+async function startWorkflow(goal) {
   await listTabs().catch(() => {});
   const acting = tabCache.find(t => t.id === actingTabId) || tabCache.find(t => t.active) || tabCache[0];
   if (!acting) throw new Error('Open a webpage first.');
   await permission(acting.url);
-  workflow = { goal, steps:[], auto, actingTabId: acting.id, contextIds: [...contextIds], stalled:0, lastHash:'', queue:[], evidence:0, unproven:0, recovered:0 };
+  if (!chat) { chat = newChatRecord(); chats.unshift(chat); }
+  chat.goal = goal; chat.title = goal.slice(0, 60);
+  workflow = { goal, steps: [], mode, actingTabId: acting.id, contextIds: [...contextIds], stalled: 0, lastHash: '', queue: [], evidence: 0, unproven: 0, recovered: 0 };
   const run = workflow;
   plan = [];
-  $('steps').textContent = '';
-  $('plan-box').hidden = true;
-  addMessage(goal, 'user');
+  pushMessage('user', goal);
   $('goal').value = ''; $('goal').style.height = '';
-  $('start').hidden = true; $('stop').hidden = false; $('goal').disabled = true; $('full-access').disabled = true;
+  $('suggest').hidden = true;
+  $('start').hidden = true; $('stop').hidden = false; $('goal').disabled = true; $('mode').disabled = true;
   $('continue').hidden = true; $('continue').textContent = CONTINUE;
-  loading('Planning the workflow', '✳');
+  loading('Reading the page', '◉');
+  send('group', { tabId: acting.id }).catch(() => {});
   try {
-    // The plan only needs the goal and starting URL, so it runs while the page is being captured.
-    const [planned, observed] = await Promise.allSettled([
-      api('/plan', { goal, url: acting.url, title: acting.title }),
-      send('observe', { tabId: acting.id, activate: true })
-    ]);
+    const observed = send('observe', { tabId: acting.id, activate: true });
+    if (planMode === 'never') {
+      const shot = await observed;
+      if (workflow !== run) return;
+      pushMessage('note', 'No checklist for this one — running it directly.');
+      await next(run, shot);
+      return;
+    }
+    const [planned, shot] = await Promise.allSettled([api('/plan', { goal, url: acting.url, title: acting.title }), observed]);
     if (workflow !== run) return;
-    if (observed.status === 'rejected') throw observed.reason;
-    plan = planned.status === 'fulfilled' && planned.value.todos?.length ? planned.value.todos : [{ id:'1', title: goal.slice(0, 140), done:false }];
+    if (shot.status === 'rejected') throw shot.reason;
+    if (planned.status === 'fulfilled' && planned.value.todos?.length) plan = planned.value.todos;
+    else if (planMode === 'always') plan = [{ id: '1', title: goal.slice(0, 140), done: false }];
+    else pushMessage('note', 'This task is short enough to run without a checklist.');
     renderPlan();
-    saveSession(run);
-    await next(run, observed.value);
+    persist().catch(() => {});
+    await next(run, shot.value);
   } catch (e) {
     if (workflow !== run) return;
-    $('loading').hidden = true;
-    $('continue').hidden = false;
-    saveSession(run);
+    $('loading').hidden = true; $('continue').hidden = false; setStatus('');
     throw e;
   }
+}
+
+/* ---------- composer & palette ---------- */
+const COMMANDS = [
+  { cmd: '/new', hint: 'Start a fresh chat', run: () => newChat() },
+  { cmd: '/chats', hint: 'Open chat history', run: () => openHistory() },
+  { cmd: '/export', hint: 'Download this chat as Markdown', run: () => exportChat() },
+  { cmd: '/plan', hint: 'Always write a checklist first', run: () => setPlanMode('always') },
+  { cmd: '/noplan', hint: 'Skip the checklist', run: () => setPlanMode('never') },
+  { cmd: '/auto-plan', hint: "Let the agent decide about a checklist", run: () => setPlanMode('auto') },
+  { cmd: '/saw', hint: 'Show the screenshot behind the last step', run: () => openSaw() },
+  { cmd: '/stop', hint: 'Stop the running workflow', run: () => { stop(); notify('Workflow stopped.'); } }
+];
+function setPlanMode(value) { planMode = value; chrome.storage.local.set({ planMode }); notify(value === 'always' ? 'Every task will get a checklist.' : value === 'never' ? 'Tasks will run without a checklist.' : 'The agent decides whether a checklist helps.'); }
+function openHistory() { renderHistory(); if (!$('history-dialog').open) $('history-dialog').showModal(); }
+function openSaw() { if (!lastShot) { notify('No screenshot yet — run a task first.', true); return; } $('saw-image').src = lastShot; if (!$('saw-dialog').open) $('saw-dialog').showModal(); }
+function hideSuggest() { $('suggest').hidden = true; $('suggest').textContent = ''; }
+function renderSuggest() {
+  const value = $('goal').value;
+  const box = $('suggest');
+  const slash = value.match(/(?:^|\s)\/([a-z-]*)$/i);
+  const at = value.match(/(?:^|\s)@([^\s@]*)$/i);
+  let items = [];
+  if (slash) items = COMMANDS.filter(command => command.cmd.startsWith('/' + slash[1].toLowerCase())).map(command => ({ label: command.cmd, hint: command.hint, apply: () => { $('goal').value = ''; command.run(); hideSuggest(); } }));
+  else if (at) items = tabCache.filter(tab => tab.supported && tab.id !== actingTabId && shortTitle(tab).toLowerCase().includes(at[1].toLowerCase())).slice(0, 6).map(tab => ({ label: `@${shortTitle(tab)}`, hint: 'Add as read-only context', apply: () => { contextIds = [...new Set([...contextIds, tab.id])].slice(0, 5); renderTabs(); $('goal').value = value.replace(/(?:^|\s)@([^\s@]*)$/i, '').trim(); notify(`Added ${shortTitle(tab)} as context.`); hideSuggest(); } }));
+  box.textContent = '';
+  if (!items.length) { hideSuggest(); return; }
+  for (const item of items) {
+    const button = document.createElement('button'); button.type = 'button'; button.className = 'suggest-item'; button.setAttribute('role', 'option');
+    const label = document.createElement('strong'); label.textContent = item.label;
+    const hint = document.createElement('span'); hint.textContent = item.hint;
+    button.append(label, hint); button.addEventListener('click', item.apply);
+    box.append(button);
+  }
+  box.hidden = false;
 }
 $('composer').addEventListener('submit', async event => {
   event.preventDefault();
@@ -278,34 +466,54 @@ $('composer').addEventListener('submit', async event => {
   const goal = $('goal').value.trim();
   if (!goal) return;
   if (goal.length > 4000) { notify('Keep your task under 4,000 characters.', true); return; }
-  const auto = $('full-access').checked;
-  $('goal').value = goal;
-  try { await startWorkflow(goal, auto); } catch (e) { notify(e.message || 'Something went wrong.', true); }
+  hideSuggest();
+  try { await startWorkflow(goal); } catch (e) { notify(e.message || 'Something went wrong.', true); }
 });
 $('goal').addEventListener('keydown', event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); $('composer').requestSubmit(); } });
-$('goal').addEventListener('input', () => { $('goal').style.height = 'auto'; $('goal').style.height = `${Math.min($('goal').scrollHeight, 160)}px`; });
+$('goal').addEventListener('input', () => { $('goal').style.height = 'auto'; $('goal').style.height = `${Math.min($('goal').scrollHeight, 160)}px`; renderSuggest(); });
+$('goal').addEventListener('blur', () => setTimeout(hideSuggest, 150));
+$('mode').addEventListener('change', () => { mode = $('mode').value; chrome.storage.local.set({ mode }); notify(mode === 'autopilot' ? 'Autopilot: actions run without asking.' : mode === 'auto' ? 'Auto: runs freely but pauses before risky steps.' : 'Approve each round before it runs.'); });
+$('new-chat').addEventListener('click', () => { newChat().catch(e => notify(e.message || 'Could not start a chat.', true)); });
+$('history-btn').addEventListener('click', openHistory);
+$('history-close').addEventListener('click', event => { event.preventDefault(); $('history-dialog').close(); });
+$('saw-btn').addEventListener('click', openSaw);
+$('saw-close').addEventListener('click', event => { event.preventDefault(); $('saw-dialog').close(); });
+$('history-export').addEventListener('click', exportChat);
+$('history-clear').addEventListener('click', async () => {
+  if (!confirm('Delete every stored chat in this browser?')) return;
+  const keep = workflow ? workflow : null;
+  chats = keep ? chats.filter(item => item === chat) : [];
+  if (!chats.length) { chat = null; await newChat(); }
+  renderHistory();
+  notify('Chat history cleared.');
+});
 $('settings-btn').addEventListener('click', () => { if (!$('settings-dialog').open) $('settings-dialog').showModal(); });
 $('settings-close').addEventListener('click', event => { event.preventDefault(); $('settings-dialog').close(); });
 $('settings-dialog').addEventListener('click', event => { if (event.target === $('settings-dialog')) $('settings-dialog').close(); });
-$('full-access').addEventListener('change', () => { chrome.storage.local.set({ autopilot: $('full-access').checked }).catch(() => {}); });
-$('plan-clear').addEventListener('click', async () => { if (workflow) return; plan = []; renderPlan(); await chrome.storage.local.remove('session'); });
-task('approve', async () => { const run = workflow; if (!proposal && !run?.queue?.length) throw new Error('Start a workflow first.'); if (proposal?.action.type === 'navigate') await permission(proposal.action.url); if (workflow !== run) return; if (!run.queue?.length && proposal) run.queue = [proposal.action]; proposal = null; $('approval').hidden = true; await runBatch(run); });
-task('continue', async () => { const run = workflow; if (!run) return; await listTabs().catch(() => {}); const acting = tabCache.find(t => t.id === run.actingTabId) || tabCache.find(t => t.active); if (acting) await permission(acting.url); else await permission(await activeUrl()); if (workflow !== run) return; $('continue').hidden = true; try { await next(run); } catch (e) { if (workflow === run) { $('loading').hidden = true; $('continue').hidden = false; } throw e; } });
+$('history-dialog').addEventListener('click', event => { if (event.target === $('history-dialog')) $('history-dialog').close(); });
+$('saw-dialog').addEventListener('click', event => { if (event.target === $('saw-dialog')) $('saw-dialog').close(); });
+$('plan-clear').addEventListener('click', () => { if (workflow) return; plan = []; renderPlan(); persist().catch(() => {}); });
+task('approve', async () => { const run = workflow; if (!run) throw new Error('Start a task first.'); if (!run.queue?.length) throw new Error('Nothing queued — send a message to continue.'); if (run.queue[0]?.type === 'navigate') await permission(run.queue[0].url); if (workflow !== run) return; $('approval').hidden = true; await runBatch(run); });
+task('continue', async () => { const run = workflow; if (!run) return; await listTabs().catch(() => {}); const acting = tabCache.find(t => t.id === run.actingTabId) || tabCache.find(t => t.active); if (acting) await permission(acting.url); else await permission(await activeUrl()); if (workflow !== run) return; $('continue').hidden = true; try { await next(run); } catch (e) { if (workflow === run) { $('loading').hidden = true; $('continue').hidden = false; setStatus(''); } throw e; } });
 $('tabs-refresh').addEventListener('click', async () => { try { await listTabs(); } catch (e) { notify(e.message || 'Could not list tabs.', true); } });
 $('tabs-current').addEventListener('click', async () => { try { const [tab] = await chrome.tabs.query({ active: true, currentWindow: true }); if (!tab?.id) throw new Error('Select a webpage first.'); actingTabId = tab.id; contextIds = contextIds.filter(id => id !== tab.id); renderTabs(); await permission(tab.url); } catch (e) { notify(e.message || 'Something went wrong.', true); } });
-listTabs().catch(() => { $('tabs-label').textContent = 'Could not list tabs.'; });
-$('reject').addEventListener('click', () => { stop(); notify('Workflow stopped without taking the proposed action.'); }); $('stop').addEventListener('click', () => { stop(); notify('Workflow stopped. An action already in progress may still finish.'); });
+$('reject').addEventListener('click', () => { stop(); notify('Stopped without taking the proposed action.'); });
+$('stop').addEventListener('click', () => { stop(); notify('Workflow stopped. An action already in progress may still finish.'); });
 $('worker').addEventListener('change', async () => { await chrome.storage.local.set({ worker: $('worker').value.trim().replace(/\/$/, '') }); });
+
 (async () => {
-  const saved = await chrome.storage.local.get(['worker', 'session', 'autopilot']);
+  const saved = await chrome.storage.local.get(['worker', 'chats', 'activeChat', 'mode', 'planMode', 'lastShot']);
   $('worker').value = saved.worker || 'https://webagent.amos-donn.workers.dev';
-  $('full-access').checked = saved.autopilot !== false;
-  const session = saved.session;
-  if (!session || !Array.isArray(session.plan) || !session.plan.length) return;
-  plan = session.plan;
-  $('steps').textContent = '';
-  if (session.goal) addMessage(session.goal, 'user');
-  for (const step of (session.steps || []).slice(-12)) { const row = document.createElement('p'); row.className = 'restored'; row.textContent = typeof step === 'string' ? step : `${step.type}${step.ok === false ? ' (failed)' : step.changed === false ? ' (no page change)' : ''}: ${step.description || ''}`; $('steps').append(row); }
-  renderPlan();
-  if (plan.some(item => !item.done)) notify('Restored an earlier plan with unfinished steps. Clear it or send a new task.');
+  mode = ['manual', 'auto', 'autopilot'].includes(saved.mode) ? saved.mode : 'autopilot';
+  planMode = ['auto', 'always', 'never'].includes(saved.planMode) ? saved.planMode : 'auto';
+  $('mode').value = mode;
+  lastShot = saved.lastShot || '';
+  $('saw-btn').hidden = !lastShot;
+  chats = Array.isArray(saved.chats) ? saved.chats : [];
+  chat = chats.find(item => item.id === saved.activeChat) || chats[0] || newChatRecord();
+  if (!chats.includes(chat)) chats.unshift(chat);
+  plan = chat.plan || [];
+  renderChat(); renderPlan();
+  if (chat.messages?.length) notify('Restored your last chat. Send a message to keep going, or start a new one.');
+  listTabs().catch(() => { $('tabs-label').textContent = 'Could not list tabs.'; });
 })();
