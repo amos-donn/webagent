@@ -46,8 +46,7 @@ async function handle(message) {
     if (!permitted(tab.url)) throw new Error('Select an HTTPS page (or a local development page). Chrome internal pages are not supported.');
     if (message.activate) { await chrome.tabs.update(tab.id, { active: true }); await new Promise(resolve => setTimeout(resolve, 350)); }
     const fresh = await getTab(tab.id);
-    const result = await readText(fresh.id);
-    const shot = await shoot(fresh.id);
+    const [result, shot] = await Promise.all([readText(fresh.id), shoot(fresh.id)]);
     return { tabId: fresh.id, url: fresh.url, title: result.title, text: result.text, ...shot };
   }
   if (message.type === 'act') {
