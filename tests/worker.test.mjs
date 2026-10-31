@@ -3,9 +3,9 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 const source = await readFile(new URL('../worker/index.js', import.meta.url), 'utf8');
 const worker = (await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`)).default;
-const db = { prepare(sql) { return { bind() { return { async first() { return sql.includes('rate_limits') ? { count: 1 } : { id: 'user', email: 'a@example.com' }; } }; } }; } };
+const db = { prepare() { return { bind() { return { async first() { return { count: 1 }; } }; } }; } };
 const observation = { goal:'Find the menu', text:'Menu', image:'YWJj', url:'https://example.com/', width:100, height:100, steps:[] };
-function request(body) { return new Request('https://worker.example/agent', { method:'POST', headers: { Authorization:`Bearer ${'a'.repeat(64)}` }, body:JSON.stringify(body) }); }
+function request(body) { return new Request('https://worker.example/agent', { method:'POST', headers: { 'Content-Type':'application/json' }, body:JSON.stringify(body) }); }
 test('agent uses free OpenRouter vision and JSON request, returning a validated action', async () => {
   const original = globalThis.fetch;
   globalThis.fetch = async (url, options) => {
