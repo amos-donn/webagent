@@ -1,6 +1,16 @@
 chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
 function permitted(url) { try { const u = new URL(url); return u.protocol === 'https:' || (u.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(u.hostname)); } catch { return false; } }
 async function debug(tabId, fn) { const target = { tabId }; await chrome.debugger.attach(target, '1.3'); try { return await fn(target); } finally { await chrome.debugger.detach(target).catch(() => {}); } }
+// SPA routing, tracking parameters and trailing slashes change the URL without changing the page.
+function samePage(a, b) {
+  if (a === b) return true;
+  try {
+    const x = new URL(a), y = new URL(b);
+    if (x.origin !== y.origin || x.pathname.replace(/\/$/, '') !== y.pathname.replace(/\/$/, '')) return false;
+    const clean = search => new URLSearchParams([...new URLSearchParams(search)].filter(([key]) => !/^(utm_|fbclid|gclid|ref$|source$)/i.test(key))).toString();
+    return clean(x.search) === clean(y.search);
+  } catch { return false; }
+}
 async function getTab(tabId) { const tab = await chrome.tabs.get(tabId); if (!tab?.id || !tab.url) throw new Error('That tab is no longer available. Refresh the tab list.'); return tab; }
 // Runs inside the page. Chrome serialises this function, so it must not reference anything outside its own body.
 function extractPageData() {
@@ -112,25 +122,29 @@ async function shoot(tabId) {
     return { image: image.data, width: viewport.clientWidth, height: viewport.clientHeight };
   });
 }
-// The viewport legitimately changes between observing and acting (side panel opening, scrollbars, reflow),
-// so map the proposed point into the live viewport instead of refusing. Only a large resize needs a fresh look.
-async function viewportAfter(target, width, height) {
-  const metrics = await chrome.debugger.sendCommand(target, 'Page.getLayoutMetrics');
-  const view = metrics.cssVisualViewport || metrics.visualViewport;
-  const currentWidth = Math.round(view.clientWidth), currentHeight = Math.round(view.clientHeight);
-  const scaleX = currentWidth / width, scaleY = currentHeight / height;
-  if (Math.abs(scaleX - 1) > 0.25 || Math.abs(scaleY - 1) > 0.25) throw new Error('The page resized a lot since the screenshot. Observe it again.');
-  return { scaleX, scaleY, currentWidth, currentHeight };
+// The viewport legitimately changes between observing and acting (side panel opening, scrollbars, reflow).
+// Map the proposed point into the live viewport and click it — never refuse on a size difference.
+async function liveViewport(target) {
+  try {
+    const metrics = await chrome.debugger.sendCommand(target, 'Page.getLayoutMetrics');
+    const view = metrics.cssVisualViewport || metrics.visualViewport || metrics.cssLayoutViewport || metrics.layoutViewport;
+    if (view && view.clientWidth > 0 && view.clientHeight > 0) return { width: Math.round(view.clientWidth), height: Math.round(view.clientHeight) };
+  } catch { /* fall back to the observed size below */ }
+  return null;
 }
-function scalePoint(action, view) {
-  const x = Math.min(Math.max(Math.round(action.x * view.scaleX), 0), view.currentWidth - 1);
-  const y = Math.min(Math.max(Math.round(action.y * view.scaleY), 0), view.currentHeight - 1);
+function scalePoint(action, observedWidth, observedHeight, live) {
+  const scaleX = live && observedWidth > 0 ? live.width / observedWidth : 1;
+  const scaleY = live && observedHeight > 0 ? live.height / observedHeight : 1;
+  const maxX = (live?.width ?? observedWidth) - 1, maxY = (live?.height ?? observedHeight) - 1;
+  const x = Math.min(Math.max(Math.round(action.x * scaleX), 0), Math.max(maxX, 0));
+  const y = Math.min(Math.max(Math.round(action.y * scaleY), 0), Math.max(maxY, 0));
+  if (Math.abs(scaleX - 1) > 0.02 || Math.abs(scaleY - 1) > 0.02) console.info(`Scaled click from ${observedWidth}x${observedHeight} to ${maxX + 1}x${maxY + 1}`);
   return { x, y };
 }
 async function clickType(tab, action, width, height) {
   return debug(tab.id, async target => {
-    const view = await viewportAfter(target, width, height);
-    const point = scalePoint(action, view);
+    const live = await liveViewport(target);
+    const point = scalePoint(action, width, height, live);
     if (action.type === 'type') {
       const check = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: (x,y) => { const e = document.elementFromPoint(x,y); return !!e && (e.tagName === 'TEXTAREA' || (e.tagName === 'INPUT' && ['text','search','email','url','tel'].includes(e.type)) || e.isContentEditable || e.getAttribute('role') === 'textbox') && !e.closest('form')?.querySelector('input[type=password]'); }, args: [point.x, point.y] });
       if (!check[0].result) throw new Error('This is not an allowed text field. Password and login forms are blocked.');
@@ -173,13 +187,13 @@ async function handle(message) {
     const tab = message.tabId ? await getTab(message.tabId) : (await chrome.tabs.query({ active: true, currentWindow: true }))[0];
     if (!tab?.id || !tab.url) throw new Error('Select a webpage first.');
     if (!permitted(tab.url)) throw new Error('Select an HTTPS page (or a local development page). Chrome internal pages are not supported.');
-    if (tab.url !== message.url) throw new Error('That page changed. Observe it again.');
+    if (!samePage(tab.url, message.url)) throw new Error('That page changed. Observe it again.');
     const action = message.action;
     if (action?.type === 'think') return {};
     await chrome.tabs.update(tab.id, { active: true });
     await new Promise(resolve => setTimeout(resolve, 250));
     const fresh = await getTab(tab.id);
-    if (fresh.url !== message.url) throw new Error('That page changed. Observe it again.');
+    if (!samePage(fresh.url, message.url)) throw new Error('That page changed. Observe it again.');
     if (action.type === 'navigate') { const url = new URL(action.url); if (!permitted(url.href) || url.username || url.password) throw new Error('Only HTTPS or local URLs are allowed.'); await chrome.tabs.update(fresh.id, { url: url.href }); return {}; }
     if (action.type === 'read') { const page = await readPage(fresh.id); return { title: page.title, text: page.text }; }
     if (action.type === 'key') {

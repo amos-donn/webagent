@@ -183,8 +183,11 @@ async function execute(run, elapsed) {
   run.steps.push({ type: a.type, description: a.description || '', ok: true, page: current.url, note, x: current.action.x, y: current.action.y, url: a.url, direction: a.direction, text: a.type === 'type' ? a.text : undefined });
   run.lastHash = ''; run.stalled = 0; run.recovered = 0;
   addStep(a, current.url, result, elapsed); currentAction(null); saveSession(run);
-  if (run.auto) { loading('Waiting for the page', '◌'); await new Promise(resolve => setTimeout(resolve, 900)); if (workflow === run) await next(run); }
-  else { $('loading').hidden = true; $('continue').hidden = false; notify('Action completed. Continue when the page has settled.'); }
+  // Always move on to the next step: review mode still shows the next action for approval, so a Continue button is unnecessary.
+  loading('Waiting for the page', '◌');
+  await new Promise(resolve => setTimeout(resolve, run.auto ? 900 : 700));
+  if (workflow !== run) return;
+  try { await next(run); } catch (e) { if (workflow === run) { $('loading').hidden = true; $('continue').hidden = false; notify(e.message || 'Could not continue automatically. Select Continue to retry.', true); } }
 }
 async function startWorkflow(goal, auto) {
   await listTabs().catch(() => {});
