@@ -9,7 +9,7 @@ const RISK = /\b(buy|purchase|pay|checkout|order now|subscribe|delete|remove|arc
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 let workflow = null, proposal = null, plan = [], chats = [], chat = null;
 let tabCache = [], actingTabId = null, contextIds = [];
-let mode = 'autopilot', planMode = 'auto', lastShot = '';
+let mode = 'autopilot', planMode = 'auto', lastShot = '', skills = [];
 
 function notify(text, error = false) { $('notice').textContent = text; $('notice').classList.toggle('error', error); $('notice').hidden = false; }
 function setStatus(text) { $('status').textContent = text || ''; $('status').hidden = !text; }
@@ -17,7 +17,7 @@ function baseUrl() { const url = new URL($('worker').value.trim()); if (url.user
 function originPattern(value) { const u = new URL(value); if (u.protocol !== 'https:' && !(u.protocol === 'http:' && ['localhost','127.0.0.1'].includes(u.hostname))) throw new Error('Only HTTPS and local pages are supported.'); return `${u.protocol}//${u.hostname}/*`; }
 async function permission(value) { const origins = [originPattern(value)]; if (!await chrome.permissions.contains({ origins }) && !await chrome.permissions.request({ origins })) throw new Error('Site access was not granted.'); }
 async function activeUrl() { const [tab] = await chrome.tabs.query({ active: true, currentWindow: true }); if (!tab?.url) throw new Error('Select a webpage first.'); return tab.url; }
-async function send(type, data = {}) { const out = await chrome.runtime.sendMessage({ type, ...data }); if (out.error) throw new Error(out.error); return out.data; }
+async function send(type, data = {}) { const out = await chrome.runtime.sendMessage({ type, ...data }); if (out.error) throw Object.assign(new Error(out.error), { code: out.code || 'ERROR' }); return out.data; }
 async function api(path, data, retries = 2) {
   const base = baseUrl();
   let lastError = new Error('Request failed.');
@@ -305,11 +305,17 @@ async function next(run, prefetched) {
   chrome.storage.local.set({ lastShot }).catch(() => {});
   const scale = image.naturalWidth / shot.width;
   const elements = (shot.elements || []).map(el => ({ role: el.role, name: el.name, x: Math.round(el.x * scale), y: Math.round(el.y * scale), off: el.off, state: el.state }));
+  const refs = Array.isArray(shot.refs) ? shot.refs : [];
   run.view = { tabId: shot.tabId, url: shot.url, width: shot.width, height: shot.height, naturalWidth: image.naturalWidth, naturalHeight: image.naturalHeight };
   const done = plan.filter(item => item.done).length;
   loading(plan.length ? `Thinking · ${done}/${plan.length} plan steps · action ${run.steps.length + 1}/${STEP_LIMIT}` : `Thinking about action ${run.steps.length + 1}`, '✳');
+  // Vision is a fallback: it is only attached for thin trees or when the model asks for it.
+  const sendImage = run.wantShot || refs.length < 15;
   const started = performance.now();
-  const { actions, action, completed, incomplete, ms } = await api('/agent', { goal:run.goal, todos:plan, steps:run.steps, url:shot.url, title:shot.title, text:shot.text, image:shot.image, width:image.naturalWidth, height:image.naturalHeight, elements, stalled:run.stalled, automatic:run.mode === 'autopilot', contexts:extra });
+  const { actions, action, completed, incomplete, memory, needScreenshot, ms } = await api('/agent', { goal:run.goal, todos:plan, steps:run.steps, url:shot.url, title:shot.title, text:shot.text, ...(sendImage ? { image: shot.image } : {}), width:image.naturalWidth, height:image.naturalHeight, elements, refs, memory: run.memory || undefined, stalled:run.stalled, automatic:run.mode === 'autopilot', contexts:extra });
+  if (memory) run.memory = memory;
+  if (needScreenshot && !run.wantShot) { run.wantShot = true; return next(run); }
+  run.wantShot = false;
   const elapsed = ms ?? Math.round(performance.now() - started);
   if (workflow !== run) return;
   if (applyCompleted(run, completed)) persist().catch(() => {});
@@ -363,14 +369,27 @@ async function executeOne(run, current) {
   currentAction(`Doing ${action.type.toUpperCase()}: ${action.description || ''}`);
   proposal = null;
   let result;
-  try { result = await send('act', current); }
+  try {
+    if (action.type === 'navigate') {
+      const origin = new URL(action.url).origin;
+      if (!run.allow.includes(origin)) {
+        const host = new URL(action.url).hostname;
+        if (!run.goal.toLowerCase().includes(host)) {
+          if (run.mode !== 'manual') throw Object.assign(new Error(`Blocked: ${host} is outside this task's allowed sites.`), { code: 'BLOCKED_ORIGIN' });
+          await permission(action.url);
+        }
+        run.allow = [...run.allow, origin];
+      }
+    }
+    result = await send('act', { ...current, goal: run.goal, allow: run.allow });
+  }
   catch (error) {
     if (workflow !== run) return 'stop';
-    if (/viewport changed|page changed|resized|observe it again/i.test(error.message) && (run.recovered || 0) < 2) { run.recovered = (run.recovered || 0) + 1; notify('The page shifted while acting. Re-reading it and trying again.'); return 'recover'; }
-    run.steps.push({ type: action.type, description: action.description || '', ok: false, changed: false, note: error.message, page: current.url });
-    recordActivity(action, current.url, {}, 0, error.message);
+    if (error.code === 'PAGE_CHANGED' && (run.recovered || 0) < 2) { run.recovered = (run.recovered || 0) + 1; notify('The page shifted while acting. Re-reading it and trying again.'); return 'recover'; }
+    run.steps.push({ type: action.type, description: action.description || '', ok: false, changed: false, code: error.code || 'ERROR', note: error.message, page: current.url });
+    recordActivity(action, current.url, {}, 0, `${error.message}${error.code ? ` [${error.code}]` : ''}`);
     currentAction(null);
-    notify(`${error.message} The agent will try a different approach when you continue.`, true);
+    notify(`${error.message}${error.code ? ` (${error.code})` : ''} The agent will try a different approach when you continue.`, true);
     return 'failed';
   }
   if (workflow !== run) return 'stop';
@@ -379,7 +398,7 @@ async function executeOne(run, current) {
   if (changed) { run.evidence = (run.evidence || 0) + 1; run.stalled = 0; run.recovered = 0; run.lastHash = ''; }
   else run.stalled = (run.stalled || 0) + 1;
   const note = action.type === 'read' && result?.text ? `page excerpt: ${String(result.text).slice(0, 1500)}` : '';
-  run.steps.push({ type: action.type, description: action.description || '', ok: true, changed, page: current.url, note, x: current.action.x, y: current.action.y, url: action.url, direction: action.direction, text: action.type === 'type' ? action.text : undefined });
+  run.steps.push({ type: action.type, description: action.description || '', ok: true, changed, page: current.url, note, code: result?.code || '', ref: action.ref, x: current.action.x, y: current.action.y, url: action.url, direction: action.direction, text: action.type === 'type' ? action.text : undefined });
   recordActivity(action, current.url, result, 0, null, { changed, fallback: !!result?.fallback });
   currentAction(null);
   return 'ok';
@@ -391,7 +410,7 @@ async function startWorkflow(goal) {
   await permission(acting.url);
   if (!chat) { chat = newChatRecord(); chats.unshift(chat); }
   chat.goal = goal; chat.title = goal.slice(0, 60);
-  workflow = { goal, steps: [], mode, actingTabId: acting.id, contextIds: [...contextIds], stalled: 0, lastHash: '', queue: [], evidence: 0, unproven: 0, recovered: 0 };
+  workflow = { goal, steps: [], mode, actingTabId: acting.id, contextIds: [...contextIds], stalled: 0, lastHash: '', queue: [], evidence: 0, unproven: 0, recovered: 0, allow: [new URL(acting.url).origin], memory: null, wantShot: false };
   const run = workflow;
   plan = [];
   pushMessage('user', goal);
@@ -434,10 +453,20 @@ const COMMANDS = [
   { cmd: '/plan', hint: 'Always write a checklist first', run: () => setPlanMode('always') },
   { cmd: '/noplan', hint: 'Skip the checklist', run: () => setPlanMode('never') },
   { cmd: '/auto-plan', hint: "Let the agent decide about a checklist", run: () => setPlanMode('auto') },
+  { cmd: '/skill', hint: 'Save this run as a reusable skill', run: () => saveSkill().catch(e => notify(e.message || 'Could not save the skill.', true)) },
   { cmd: '/saw', hint: 'Show the screenshot behind the last step', run: () => openSaw() },
   { cmd: '/stop', hint: 'Stop the running workflow', run: () => { stop(); notify('Workflow stopped.'); } }
 ];
 function setPlanMode(value) { planMode = value; chrome.storage.local.set({ planMode }); notify(value === 'always' ? 'Every task will get a checklist.' : value === 'never' ? 'Tasks will run without a checklist.' : 'The agent decides whether a checklist helps.'); }
+async function saveSkill() {
+  const steps = (workflow ? workflow.steps : chat?.steps) || [];
+  const goal = workflow ? workflow.goal : (chat?.goal || '');
+  if (!steps.length) throw new Error('Run a task first, then save it as a skill.');
+  const { skill } = await api('/skill', { goal, steps });
+  skills = [{ ...skill, at: Date.now() }, ...skills].slice(0, 20);
+  await chrome.storage.local.set({ skills });
+  notify(`Saved “${skill.name}”. Type / to run it.`);
+}
 function openHistory() { renderHistory(); if (!$('history-dialog').open) $('history-dialog').showModal(); }
 function openSaw() { if (!lastShot) { notify('No screenshot yet — run a task first.', true); return; } $('saw-image').src = lastShot; if (!$('saw-dialog').open) $('saw-dialog').showModal(); }
 function hideSuggest() { $('suggest').hidden = true; $('suggest').textContent = ''; }
@@ -447,7 +476,10 @@ function renderSuggest() {
   const slash = value.match(/(?:^|\s)\/([a-z-]*)$/i);
   const at = value.match(/(?:^|\s)@([^\s@]*)$/i);
   let items = [];
-  if (slash) items = COMMANDS.filter(command => command.cmd.startsWith('/' + slash[1].toLowerCase())).map(command => ({ label: command.cmd, hint: command.hint, apply: () => { $('goal').value = ''; command.run(); hideSuggest(); } }));
+  if (slash) items = [
+    ...COMMANDS.filter(command => command.cmd.startsWith('/' + slash[1].toLowerCase())).map(command => ({ label: command.cmd, hint: command.hint, apply: () => { $('goal').value = ''; command.run(); hideSuggest(); } })),
+    ...skills.filter(skill => ('/' + skill.name).toLowerCase().replace(/[^a-z0-9/]+/g, '-').startsWith('/' + slash[1].toLowerCase())).map(skill => ({ label: '/' + skill.name, hint: skill.description || 'Run a saved skill', apply: () => { $('goal').value = skill.prompt || (skill.steps || []).join(' → '); hideSuggest(); notify('Skill loaded — send the message to run it.'); } }))
+  ];
   else if (at) items = tabCache.filter(tab => tab.supported && tab.id !== actingTabId && shortTitle(tab).toLowerCase().includes(at[1].toLowerCase())).slice(0, 6).map(tab => ({ label: `@${shortTitle(tab)}`, hint: 'Add as read-only context', apply: () => { contextIds = [...new Set([...contextIds, tab.id])].slice(0, 5); renderTabs(); $('goal').value = value.replace(/(?:^|\s)@([^\s@]*)$/i, '').trim(); notify(`Added ${shortTitle(tab)} as context.`); hideSuggest(); } }));
   box.textContent = '';
   if (!items.length) { hideSuggest(); return; }
@@ -500,10 +532,13 @@ $('tabs-current').addEventListener('click', async () => { try { const [tab] = aw
 $('reject').addEventListener('click', () => { stop(); notify('Stopped without taking the proposed action.'); });
 $('stop').addEventListener('click', () => { stop(); notify('Workflow stopped. An action already in progress may still finish.'); });
 $('worker').addEventListener('change', async () => { await chrome.storage.local.set({ worker: $('worker').value.trim().replace(/\/$/, '') }); });
+$('bridge-toggle').addEventListener('change', async () => { try { const out = await send('bridge', { on: $('bridge-toggle').checked }); notify(out.connected ? 'Bridge on. Start node bridge/server.mjs to accept MCP clients.' : 'Bridge off.'); } catch (e) { notify(e.message || 'Could not toggle the bridge.', true); } });
 
 (async () => {
-  const saved = await chrome.storage.local.get(['worker', 'chats', 'activeChat', 'mode', 'planMode', 'lastShot']);
+  const saved = await chrome.storage.local.get(['worker', 'chats', 'activeChat', 'mode', 'planMode', 'lastShot', 'skills', 'bridge']);
   $('worker').value = saved.worker || 'https://webagent.amos-donn.workers.dev';
+  skills = Array.isArray(saved.skills) ? saved.skills : [];
+  $('bridge-toggle').checked = saved.bridge === true;
   mode = ['manual', 'auto', 'autopilot'].includes(saved.mode) ? saved.mode : 'autopilot';
   planMode = ['auto', 'always', 'never'].includes(saved.planMode) ? saved.planMode : 'auto';
   $('mode').value = mode;

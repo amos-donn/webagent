@@ -35,3 +35,19 @@ The message box understands two shortcuts: `/` opens commands (`/new`, `/chats`,
 A checklist is optional: the planner returns no steps for short tasks, so a one-click job runs without one. Use `/plan` to force a checklist for every task or `/noplan` to skip it.
 
 The mode picker next to the send button mirrors the three modes Claude in Chrome offers: **Ask each round** pauses for approval, **Auto** runs freely but pauses before steps that look irreversible (paying, deleting, sending, submitting, sharing, uploading, or typing password/card-like text), and **Autopilot** never pauses. The starred tab is added to a `webagent` tab group when a task starts, and ◉ shows the exact screenshot the last decision was made from.
+
+## Accessibility refs, safety boundary, skills, evals and the MCP bridge
+
+**Grounding.** Every observation now includes an accessibility-tree snapshot (`Accessibility.getFullAXTree`) exposed as refs (`e12`). Actions may target `{"ref":"e12"}` instead of coordinates, which works off-screen and inside shadow roots; refs are stored per tab in session storage and expire with the page. A `fill` action sets up to 12 fields in one call.
+
+**Context.** The screenshot is only attached when the tree is thin (fewer than 15 refs) or when the model asks with `{"needScreenshot":true}`, and each reply may carry a three-field `memory` that is fed back on the next round.
+
+**Safety.** Page text is wrapped in random `<<SNAP-…>>` delimiters, instruction-looking lines are removed before the model sees them, CSS-hidden text is dropped at extraction, cross-origin navigation must be inside the task's origin allowlist, and clicks on destructive labels (`delete`, `pay`, `send`, …) are refused with `BLOCKED_ACTION` unless your goal mentions them.
+
+**Typed errors.** Failures return codes (`STALE_REF`, `NOT_ACTIONABLE`, `BLOCKED_ACTION`, `BLOCKED_ORIGIN`, `PAGE_CHANGED`, `NO_EFFECT`, `PASSWORD_FIELD`) which appear in the timeline and in the model's history.
+
+**Skills.** `/skill` distils the current run into a named, parameterised skill (secrets listed as parameters, values never stored) and `/` lists saved skills to replay.
+
+**Evals.** `node evals/run.mjs --validate` checks the 30-task rubric suite; grading exported chats gives pass@3.
+
+**MCP bridge.** Enable **Local bridge** in Settings, run `node bridge/server.mjs`, then point any MCP client at `node mcp/server.mjs` to drive the tab with `browser_observe`, `browser_click`, `browser_type`, `browser_fill`, `browser_key`, `browser_scroll`, `browser_navigate`, `browser_read` and `browser_screenshot`. The bridge binds loopback only and rejects requests carrying a web Origin. Neither piece needs an account or a key.
