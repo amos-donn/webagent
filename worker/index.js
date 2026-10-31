@@ -62,7 +62,12 @@ function contextBlock(contexts) {
 }
 function elementsBlock(elements) {
   if (!elements.length) return '';
-  return "\nINTERACTIVE ELEMENTS IN THE SCREENSHOT (x,y is each control's centre in screenshot pixels; clicking that point is usually more reliable than guessing):\n" + elements.map(element => `${element.role} "${element.name}" @ ${element.x},${element.y}`).join('\n');
+  const onscreen = elements.filter(element => !element.off);
+  const offscreen = elements.filter(element => element.off);
+  const parts = [];
+  if (onscreen.length) parts.push("\nINTERACTIVE ELEMENTS IN THE SCREENSHOT (x,y is each control's centre in screenshot pixels; clicking that point is usually more reliable than guessing):\n" + onscreen.map(element => `${element.role} "${element.name}" @ ${element.x},${element.y}${element.state ? ` [${element.state}]` : ''}`).join('\n'));
+  if (offscreen.length) parts.push('\nOFF-SCREEN CONTROLS (present on the page but outside the viewport — scroll to reach them, never click these):\n' + offscreen.map(element => `${element.role} "${element.name}" (${element.off === 'above' ? 'scroll up' : 'scroll down'})${element.state ? ` [${element.state}]` : ''}`).join('\n'));
+  return parts.join('\n');
 }
 function sameAction(a, b) {
   if (!a || !b || a.type !== b.type) return false;
@@ -116,6 +121,7 @@ function agentPrompt(input, page, todos, steps, contexts, elements, correction) 
     'Never repeat an action listed in the history that did not change the page — vary the element, scroll, or read the page instead.',
     'Use read when the visible text is not enough, wait when the page is still loading, and key to press Enter/Escape/Tab.',
     'If a cookie banner, modal or overlay blocks the target, dismiss it first.',
+    'On-screen controls are listed with coordinates; off-screen controls are listed without them and must be scrolled into view. Never click a [disabled] control.',
     'Return done as soon as the goal is met, or if it is genuinely impossible; never fabricate completion.'
   ].join('\n');
   const progress = `STEP ${steps.length + 1} of 40` + (todos.length ? ` · plan ${todos.length - unchecked.length}/${todos.length} done` : '');
@@ -212,7 +218,7 @@ export default {
         const todos = Array.isArray(input.todos) ? input.todos.slice(0, 8).map((todo, index) => ({ id: clip(todo?.id, 40) || String(index + 1), title: clip(todo?.title, 160), done: todo?.done === true })).filter(todo => todo.title) : [];
         const steps = normalizeSteps(input.steps);
         const contexts = Array.isArray(input.contexts) ? input.contexts.slice(0, 5).map(c => ({ url: clip(c?.url, 2000), title: clip(c?.title, 300), text: clip(c?.text, 3000) })).filter(c => c.url && c.text) : [];
-        const elements = Array.isArray(input.elements) ? input.elements.slice(0, 60).map(element => ({ role: clip(element?.role, 24), name: clip(element?.name, 80), x: Math.round(Number(element?.x)), y: Math.round(Number(element?.y)) })).filter(element => element.name && Number.isFinite(element.x) && Number.isFinite(element.y) && element.x >= 0 && element.y >= 0 && element.x < input.width && element.y < input.height) : [];
+        const elements = Array.isArray(input.elements) ? input.elements.slice(0, 110).map(element => ({ role: clip(element?.role, 24), name: clip(element?.name, 80), x: Math.round(Number(element?.x)), y: Math.round(Number(element?.y)), off: ['above', 'below'].includes(element?.off) ? element.off : '', state: ['disabled', 'checked'].includes(element?.state) ? element.state : '' })).filter(element => element.name && Number.isFinite(element.x) && Number.isFinite(element.y) && element.x >= -40 && element.x <= input.width + 40 && element.y >= -input.height && element.y <= input.height * 2) : [];
         const observation = { goal: input.goal, title: input.title, width: input.width, height: input.height, automatic: input.automatic, stalled: input.stalled, text: input.text };
         let action, completed = [], incomplete = [], correction = '', totalMs = 0, model = modelName(env), retried = false;
         for (let round = 1; round <= 2; round++) {

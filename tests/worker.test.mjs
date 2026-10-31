@@ -54,6 +54,24 @@ test('prompt carries the plan, condensed older steps, element hints and todo fil
   } finally { mock.restore(); }
 });
 
+test('off-screen and disabled controls are described without click coordinates', async () => {
+  const mock = scripted([{ type:'scroll', direction:'down', description:'Reveal the footer form' }]);
+  try {
+    const response = await worker.fetch(request({ ...observation, elements:[
+      { role:'button', name:'Search', x:20, y:30, off:'', state:'' },
+      { role:'button', name:'Submit order', x:30, y:150, off:'below', state:'disabled' },
+      { role:'link', name:'Docs', x:10, y:-20, off:'above', state:'' }
+    ] }), { DB:db, OPENROUTER_API_KEY:'test-key' });
+    assert.equal(response.status, 200);
+    const prompt = mock.calls[0].messages[0].content[0].text;
+    assert.match(prompt, /button "Search" @ 20,30/);
+    assert.match(prompt, /OFF-SCREEN CONTROLS/);
+    assert.match(prompt, /button "Submit order" \(scroll down\) \[disabled\]/);
+    assert.match(prompt, /link "Docs" \(scroll up\)/);
+    assert.doesNotMatch(prompt, /"Submit order" @/);
+  } finally { mock.restore(); }
+});
+
 test('a repeated click is corrected once and the second choice is returned', async () => {
   const mock = scripted([click(), { type:'scroll', direction:'down', description:'Reveal more menu items' }]);
   const steps = [{ type:'click', x:11, y:19, description:'Open menu', ok:true }, { type:'click', x:10, y:21, description:'Open menu again', ok:true }];

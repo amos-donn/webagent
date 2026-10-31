@@ -122,7 +122,7 @@ async function next(run, prefetched) {
   const extra = (await Promise.all(contexts.map(t => send('context', { tabId: t.id }).then(c => c.text ? { url: c.url, title: c.title, text: c.text.slice(0, 4000) } : null).catch(() => null)))).filter(Boolean);
   const image = $('screenshot'); image.src = `data:image/jpeg;base64,${shot.image}`; await image.decode();
   const scale = image.naturalWidth / shot.width;
-  const elements = (shot.elements || []).map(el => ({ role: el.role, name: el.name, x: Math.round(el.x * scale), y: Math.round(el.y * scale) }));
+  const elements = (shot.elements || []).map(el => ({ role: el.role, name: el.name, x: Math.round(el.x * scale), y: Math.round(el.y * scale), off: el.off, state: el.state }));
   const done = plan.filter(t => t.done).length;
   loading(plan.length ? `Thinking · ${done}/${plan.length} plan steps done` : 'Thinking about the next step', '✳');
   const started = performance.now();
