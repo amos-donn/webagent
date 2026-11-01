@@ -36,6 +36,10 @@ button.plan-mark:hover { opacity: .75; }
 .composer textarea:disabled{background:transparent;color:#8b9a8d}
 .composer textarea::placeholder{color:#a6b2a6}
 .composer-bar{display:flex;align-items:flex-end;justify-content:space-between;gap:8px;padding:0 5px 0 6px}
+.skill-chip{padding:8px 9px 0}
+.skill-run{display:inline-flex;align-items:center;gap:7px;background:#f5efff;color:#5b21b6;border:1px solid #e2d4fb;border-radius:999px;font-size:11.5px;font-weight:700;padding:7px 11px;cursor:pointer;transition:background .15s ease,border-color .15s ease}
+.skill-run:hover{background:#ede2ff;border-color:#cdb6f6}
+.skill-run::before{content:"";width:6px;height:6px;border-radius:50%;background:#a855f7;box-shadow:0 0 6px rgba(168,85,247,.6);flex:none}
 .composer-actions{display:flex;align-items:center;gap:6px}
 .send{width:38px;height:38px;border-radius:12px;border:0;padding:0;display:grid;place-items:center;background:var(--green);color:#fff;cursor:pointer;transition:background .15s ease,transform .1s ease,width .15s ease,height .15s ease}
 .send:hover:not(:disabled){background:#214839}

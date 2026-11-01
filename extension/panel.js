@@ -139,6 +139,7 @@ function renderTabs() {
   }
   const acting = tabCache.find(t => t.id === actingTabId);
   $('tabs-label').textContent = acting ? `★ ${shortTitle(acting)}${contextIds.length ? ` · +${contextIds.length} context` : ''}` : 'No tab selected';
+  renderSkillChip();
 }
 
 /* ---------- chats ---------- */
@@ -301,7 +302,7 @@ function stop() {
   $('approval').hidden = true; $('stop').hidden = true; $('start').hidden = false;
   $('goal').disabled = false; $('mode').disabled = false; $('loading').hidden = true;
   setStatus('');
-  renderPlan(); persist().catch(() => {});
+  renderPlan(); renderSkillChip(); persist().catch(() => {});
 }
 function loading(label, icon = 'spinner-gap') {
   $('loading-label').textContent = label;
@@ -397,7 +398,7 @@ async function next(run, prefetched) {
   // Vision is a fallback: it is only attached for thin trees or when the model asks for it.
   const sendImage = run.wantShot || refs.length < 15;
   const started = performance.now();
-  const { actions, action, completed, incomplete, memory, needScreenshot, ms } = await api('/agent', { goal:run.goal, intent:[run.goal, ...plan.map(item => item.title)].join('\n'), todos:plan, steps:run.steps, url:shot.url, title:shot.title, text:shot.text, ...(sendImage ? { image: shot.image } : {}), width:image.naturalWidth, height:image.naturalHeight, elements, refs, memory: run.memory || undefined, stalled:run.stalled, automatic:run.mode === 'autopilot', correction: run.correction || undefined, contexts:extra });
+  const { actions, action, completed, incomplete, memory, needScreenshot, ms } = await api('/agent', { goal:aimed(run), intent:[run.goal, ...plan.map(item => item.title)].join('\n'), todos:plan, steps:run.steps, url:shot.url, title:shot.title, text:shot.text, ...(sendImage ? { image: shot.image } : {}), width:image.naturalWidth, height:image.naturalHeight, elements, refs, memory: run.memory || undefined, stalled:run.stalled, automatic:run.mode === 'autopilot', correction: run.correction || undefined, contexts:extra });
   if (memory) run.memory = memory;
   run.correction = '';
   if (needScreenshot && !run.wantShot) { run.wantShot = true; return next(run); }
@@ -517,18 +518,22 @@ async function executeOne(run, current) {
   currentAction(null);
   return 'ok';
 }
-async function startWorkflow(goal) {
+async function startWorkflow(goal, skill) {
   await listTabs().catch(() => {});
   const acting = tabCache.find(t => t.id === actingTabId) || tabCache.find(t => t.active) || tabCache[0];
   if (!acting) throw new Error('Open a webpage first.');
   await permission(acting.url);
   if (!chat) { chat = newChatRecord(); chats.unshift(chat); }
+  // A clicked or named skill wins; otherwise a Google page plus summarising words picks it up by itself.
+  const chosen = skill || builtinFor(acting.url, goal);
   chat.goal = goal; chat.title = goal.slice(0, 60);
-  workflow = { goal, steps: [], mode, actingTabId: acting.id, contextIds: [...contextIds], stalled: 0, lastHash: '', queue: [], evidence: 0, unproven: 0, recovered: 0, retries: 0, apiRetries: 0, keepGoing: 0, allow: [new URL(acting.url).origin], memory: null, wantShot: false };
+  workflow = { goal, skill: chosen || null, steps: [], mode, actingTabId: acting.id, contextIds: [...contextIds], stalled: 0, lastHash: '', queue: [], evidence: 0, unproven: 0, recovered: 0, retries: 0, apiRetries: 0, keepGoing: 0, allow: [new URL(acting.url).origin], memory: null, wantShot: false };
   const run = workflow;
   plan = [];
   pushMessage('user', goal);
+  if (chosen) pushMessage('note', `Using the built-in “${chosen.name}” skill for this page.`);
   $('goal').value = ''; grow();
+  renderSkillChip();
   $('suggest').hidden = true;
   $('start').hidden = true; $('stop').hidden = false; $('goal').disabled = true; $('mode').disabled = true;
   loading('Reading the page', 'eye');
@@ -542,7 +547,7 @@ async function startWorkflow(goal) {
       await next(run, shot);
       return;
     }
-    const [planned, shot] = await Promise.allSettled([api('/plan', { goal, url: acting.url, title: acting.title }), observed]);
+    const [planned, shot] = await Promise.allSettled([api('/plan', { goal: aimed(run), url: acting.url, title: acting.title }), observed]);
     if (workflow !== run) return;
     if (shot.status === 'rejected') throw shot.reason;
     if (planned.status === 'fulfilled' && planned.value.todos?.length) plan = planned.value.todos;
@@ -571,6 +576,37 @@ const COMMANDS = [
   { cmd: '/stop', hint: 'Stop the running workflow', run: () => { stop(); notify('Workflow stopped.'); } }
 ];
 function setPlanMode(value) { planMode = value; chrome.storage.local.set({ planMode }); notify(value === 'always' ? 'Every task will get a checklist.' : value === 'never' ? 'Tasks will run without a checklist.' : 'The agent decides whether a checklist helps.'); }
+// Built-in skills. They are not stored with the distilled ones: they are matched from the page the
+// user is on, so "summarize this" on a Google doc needs no setup at all.
+const BUILTIN_SKILLS = [{
+  id: 'summarize-google',
+  name: 'Summarize with Gemini',
+  description: 'Summarize this Google doc, sheet, thread or results page',
+  hosts: ['docs.google.com', 'drive.google.com', 'sheets.google.com', 'slides.google.com', 'mail.google.com', 'google.com'],
+  triggers: /\b(summar\w*|tl;?dr|key ?points|recap|digest|bullet ?points|main ideas)\b/i,
+  defaultGoal: 'Summarize this page',
+  prompt: 'Summarize what is on this page. The page text in the observation is the source; use read once only if it is missing or cut off. Finish with a done action whose summary is the answer: one sentence with the main point, then 3 to 5 short key points on their own lines. Do not click, type into, edit, reformat or write into the page — the summary belongs in the chat.'
+}];
+const hostOf = url => { try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return ''; } };
+// Host decides which skill a page offers; the wording decides whether an ordinary goal picks it up.
+function builtinFor(url, goal = '') {
+  const host = hostOf(url);
+  if (!host) return null;
+  if (goal && !BUILTIN_SKILLS.some(skill => skill.triggers.test(goal))) return null;
+  return BUILTIN_SKILLS.find(skill => skill.hosts.includes(host)) || null;
+}
+const aimed = run => run.skill ? `${run.skill.prompt}\n\nUSER GOAL: ${run.goal}` : run.goal;
+function renderSkillChip() {
+  const chip = $('skill-chip');
+  const tab = tabCache.find(t => t.id === actingTabId) || tabCache.find(t => t.active);
+  const skill = !workflow && tab?.supported ? builtinFor(tab.url) : null;
+  if (!skill) { chip.hidden = true; return; }
+  const button = $('skill-run');
+  button.textContent = skill.name;
+  button.title = skill.description;
+  button.onclick = () => { if (workflow) return; $('goal').value = skill.defaultGoal; grow(); $('composer').requestSubmit(); };
+  chip.hidden = false;
+}
 async function saveSkill() {
   const steps = (workflow ? workflow.steps : chat?.steps) || [];
   const goal = workflow ? workflow.goal : (chat?.goal || '');
@@ -591,7 +627,8 @@ function renderSuggest() {
   let items = [];
   if (slash) items = [
     ...COMMANDS.filter(command => command.cmd.startsWith('/' + slash[1].toLowerCase())).map(command => ({ label: command.cmd, hint: command.hint, apply: () => { $('goal').value = ''; command.run(); hideSuggest(); } })),
-    ...skills.filter(skill => ('/' + skill.name).toLowerCase().replace(/[^a-z0-9/]+/g, '-').startsWith('/' + slash[1].toLowerCase())).map(skill => ({ label: '/' + skill.name, hint: skill.description || 'Run a saved skill', apply: () => { $('goal').value = skill.prompt || (skill.steps || []).join(' → '); hideSuggest(); notify('Skill loaded — send the message to run it.'); } }))
+    ...skills.filter(skill => ('/' + skill.name).toLowerCase().replace(/[^a-z0-9/]+/g, '-').startsWith('/' + slash[1].toLowerCase())).map(skill => ({ label: '/' + skill.name, hint: skill.description || 'Run a saved skill', apply: () => { $('goal').value = skill.prompt || (skill.steps || []).join(' → '); hideSuggest(); notify('Skill loaded — send the message to run it.'); } })),
+    ...BUILTIN_SKILLS.filter(skill => ('/' + skill.name).toLowerCase().replace(/[^a-z0-9/]+/g, '-').startsWith('/' + slash[1].toLowerCase())).map(skill => ({ label: '/' + skill.name, hint: skill.description, apply: () => { $('goal').value = skill.defaultGoal; grow(); hideSuggest(); notify(`Skill loaded — send it to run “${skill.name}”.`); } }))
   ];
   else if (at) items = tabCache.filter(tab => tab.supported && tab.id !== actingTabId && shortTitle(tab).toLowerCase().includes(at[1].toLowerCase())).slice(0, 6).map(tab => ({ label: `@${shortTitle(tab)}`, hint: 'Add as read-only context', apply: () => { contextIds = [...new Set([...contextIds, tab.id])].slice(0, 5); renderTabs(); $('goal').value = value.replace(/(?:^|\s)@([^\s@]*)$/i, '').trim(); notify(`Added ${shortTitle(tab)} as context.`); hideSuggest(); } }));
   box.textContent = '';

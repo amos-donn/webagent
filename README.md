@@ -66,7 +66,7 @@ The mode picker mirrors the three modes Claude in Chrome offers: **Ask each roun
 
 **Typed errors.** Failures return codes (`STALE_REF`, `NOT_ACTIONABLE`, `BLOCKED_ACTION`, `PAGE_CHANGED`, `NO_EFFECT`, `PASSWORD_FIELD`) which appear in the timeline and in the model's history. In Auto and Autopilot a failed step is feedback, not an ending: the run re-reads the page and tries another route (up to three consecutive retries) instead of handing control back after one obstacle.
 
-**Skills.** `/skill` distils the current run into a named, parameterised skill (secrets listed as parameters, values never stored) and `/` lists saved skills to replay.
+**Skills.** `/skill` distils the current run into a named, parameterised skill (secrets listed as parameters, values never stored) and `/` lists saved skills to replay. One skill ships built in: **Summarize with Gemini**. On a Google page — Docs, Drive, Sheets, Slides, Gmail or Search — a purple pill appears inside the message box, and typing anything with *summarize*, *tl;dr*, *key points* or *recap* in it attaches the skill automatically, so "summarize this" needs no setup. The skill tells the agent to read the page, answer with its `done` summary and leave the document untouched; the result lands in the chat report.
 
 **Evals.** `node evals/run.mjs --validate` checks the 30-task rubric suite; grading exported chats gives pass@3.
 
