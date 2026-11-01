@@ -1,6 +1,6 @@
 const $ = id => document.getElementById(id);
-const ICONS = { think:'sparkle', click:'cursor-click', type:'keyboard', read:'book-open-text', scroll:'arrows-down-up', wait:'hourglass', navigate:'arrow-right', key:'key-return' };
-const LABELS = { think:'Thinking through', click:'Clicking', type:'Typing', read:'Reading page', scroll:'Scrolling', wait:'Waiting', navigate:'Navigating', key:'Pressing key' };
+const ICONS = { think:'sparkle', click:'cursor-click', type:'keyboard', write:'sparkle', read:'book-open-text', scroll:'arrows-down-up', wait:'hourglass', navigate:'arrow-right', key:'key-return' };
+const LABELS = { think:'Thinking through', click:'Clicking', type:'Typing', write:'Writing with Gemini', read:'Reading page', scroll:'Scrolling', wait:'Waiting', navigate:'Navigating', key:'Pressing key' };
 const STEP_LIMIT = 60;
 const MAX_CHATS = 20;
 const MAX_MESSAGES = 400;
@@ -342,6 +342,7 @@ function riskyAction(action) {
 function describe(action, queued) {
   const extra = [
     action.type === 'type' ? `\nText: ${action.text}${action.submit ? ' (then Enter)' : ''}` : '',
+    action.type === 'write' ? `\nBrief: ${action.brief}${action.replace ? '\nReplaces what is already in the field' : ''}` : '',
     action.type === 'navigate' ? `\nDestination: ${action.url}` : '',
     action.type === 'scroll' ? `\nDirection: ${action.direction}` : '',
     action.type === 'wait' ? `\nWait: ${action.seconds}s` : '',
@@ -471,7 +472,7 @@ async function safeNext(run) {
 async function executeOne(run, current) {
   if (!current || workflow !== run) return 'stop';
   const action = current.action;
-  loading(LABELS[action.type] || 'Working', ICONS[action.type] || '✳');
+  loading(LABELS[action.type] || 'Working', ICONS[action.type] || 'sparkle');
   currentAction(`Doing ${action.type.toUpperCase()}: ${action.description || ''}`);
   proposal = null;
   let result;
@@ -505,6 +506,7 @@ async function executeOne(run, current) {
   }
   if (workflow !== run) return 'stop';
   if (result?.notice) pushMessage('note', result.notice);
+  if (result?.generated) pushMessage('note', `Gemini wrote ${Number(result.generated).toLocaleString()} characters into the field.`);
   const verified = result?.effect?.verified;
   const changed = verified !== false;
   if (changed) { run.evidence = (run.evidence || 0) + 1; run.stalled = 0; run.recovered = 0; run.retries = 0; run.lastHash = ''; run.apiRetries = 0; }

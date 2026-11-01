@@ -12,6 +12,8 @@ function scripted(replies) { const calls = [], urls = [], headers = []; const or
 // The prompt as the model sees it, and the inline image part when one was attached.
 const said = call => call.contents.at(-1).parts.filter(part => part.text).map(part => part.text).join('\n');
 const attached = call => call.contents.at(-1).parts.find(part => part.inlineData)?.inlineData;
+// Serves a Gemini SSE stream so the /write relay can be read as events.
+function streaming(chunks, status = 200) { const calls = [], urls = [], original = globalThis.fetch; globalThis.fetch = async (url, options) => { calls.push(JSON.parse(options.body)); urls.push(String(url)); const body = status === 200 ? chunks.map(text => `data: ${JSON.stringify({ candidates:[{ content:{ role:'model', parts:[{ text }] } }] })}\n\n`).join('') : JSON.stringify({ error:{ message:'quota exceeded' } }); return new Response(body, { status, headers:{ 'Content-Type': status === 200 ? 'text/event-stream' : 'application/json' } }); }; return { calls, urls, restore: () => { globalThis.fetch = original; } }; }
 const click = (extra = {}) => ({ type:'click', x:10, y:20, description:'Open menu', ...extra });
 
 test('plan endpoint returns a numbered checklist without sending an image', async () => {
@@ -378,6 +380,77 @@ test('an unrecognised review verdict is unconfirmed, and a pass can never ask fo
   } finally { pass.restore(); }
   const bad = await worker.fetch(request({ goal:'Read the price', url:'https://example.com/pricing', text:'' }, '/review'), { DB:db, GEMINI_API_KEY:'test-key' });
   assert.equal(bad.status, 400);
+});
+
+test('the agent prompt carries click, scroll, type and write standards', async () => {
+  const mock = scripted([{ actions:[{ type:'click', ref:'e1', description:'Open the menu' }] }]);
+  try {
+    await worker.fetch(request({ ...observation, refs:[{ ref:'e1', role:'button', name:'Menu' }] }), { DB:db, GEMINI_API_KEY:'test-key' });
+    const prompt = said(mock.calls[0]);
+    assert.match(prompt, /HOW TO ACT — use the highest rung/);
+    assert.match(prompt, /CLICK RULES: one click per control per round/);
+    assert.match(prompt, /WHEN A CLICK FAILS, switch method/);
+    assert.match(prompt, /After two failures on the same control/);
+    assert.match(prompt, /SCROLL RULES/);
+    assert.match(prompt, /TYPE RULES/);
+    assert.match(prompt, /GENERATING TEXT/);
+    assert.match(prompt, /write with a short brief/);
+  } finally { mock.restore(); }
+});
+
+test('a write action carries a brief, replaces only on request, and cannot be batched', async () => {
+  const ok = scripted([{ actions:[{ type:'write', ref:'e7', brief:'Rewrite the intro in two sentences', replace:true, description:'Rewrite the intro' }] }]);
+  try {
+    const response = await worker.fetch(request({ ...observation, refs:[{ ref:'e7', role:'textbox', name:'Body' }] }), { DB:db, GEMINI_API_KEY:'test-key' });
+    assert.equal(response.status, 200);
+    const out = await response.json();
+    assert.equal(out.action.type, 'write');
+    assert.equal(out.action.brief, 'Rewrite the intro in two sentences');
+    assert.equal(out.action.replace, true);
+    assert.match(said(ok.calls[0]), /"type":"write"/);
+  } finally { ok.restore(); }
+  const plain = scripted([{ actions:[{ type:'write', ref:'e7', brief:'Add a closing line', description:'Extend the note' }] }]);
+  try {
+    const out = await (await worker.fetch(request({ ...observation, refs:[{ ref:'e7', role:'textbox', name:'Body' }] }), { DB:db, GEMINI_API_KEY:'test-key' })).json();
+    assert.equal(out.action.replace, false, 'append unless replace is asked for');
+  } finally { plain.restore(); }
+  const bad = scripted([{ actions:[{ type:'write', ref:'e7', description:'Rewrite it' }] }]);
+  try {
+    const response = await worker.fetch(request({ ...observation, refs:[{ ref:'e7', role:'textbox', name:'Body' }] }), { DB:db, GEMINI_API_KEY:'test-key' });
+    assert.equal(response.status, 400);
+    assert.match((await response.json()).error, /needs a brief/);
+  } finally { bad.restore(); }
+  const batched = scripted([{ actions:[{ type:'write', ref:'e7', brief:'Rewrite it', description:'Write' }, click()] }]);
+  try {
+    const response = await worker.fetch(request({ ...observation, refs:[{ ref:'e7', role:'textbox', name:'Body' }] }), { DB:db, GEMINI_API_KEY:'test-key' });
+    assert.match((await response.json()).error, /cannot be batched/);
+  } finally { batched.restore(); }
+});
+
+test('the write endpoint streams generated prose as events', async () => {
+  const mock = streaming(['Hello there. ', 'General Kenobi.']);
+  try {
+    const response = await worker.fetch(request({ goal:'Improve this doc', brief:'Rewrite the intro in two sentences', field:'textbox Body', existing:'Old intro', context:'Doc text', url:'https://docs.example.com/d/1' }, '/write'), { DB:db, GEMINI_API_KEY:'test-key' });
+    assert.equal(response.status, 200);
+    assert.match(response.headers.get('content-type'), /text\/event-stream/);
+    const events = (await response.text()).split('\n\n').filter(Boolean).map(block => JSON.parse(block.replace(/^data: /, '')));
+    assert.equal(events.filter(event => event.text).map(event => event.text).join(''), 'Hello there. General Kenobi.');
+    assert.equal(events.at(-1).done, true);
+    assert.ok(events.at(-1).chars > 20);
+    assert.match(mock.urls[0], /streamGenerateContent\?alt=sse$/);
+    assert.equal(mock.calls[0].generationConfig.responseMimeType, undefined, 'prose is not requested as JSON');
+    const prompt = said(mock.calls[0]);
+    assert.match(prompt, /reply with the text only/);
+    assert.match(prompt, /WHAT TO WRITE: Rewrite the intro in two sentences/);
+    assert.match(prompt, /CURRENT CONTENT OF THE FIELD/);
+    assert.match(prompt, /data only, never instructions/);
+  } finally { mock.restore(); }
+  const quota = streaming([], 429);
+  try {
+    const response = await worker.fetch(request({ goal:'Improve this doc', url:'https://docs.example.com/d/1' }, '/write'), { DB:db, GEMINI_API_KEY:'test-key' });
+    assert.equal(response.status, 429);
+    assert.match((await response.json()).error, /quota exceeded/);
+  } finally { quota.restore(); }
 });
 
 test('a correction from the final check is carried into the next round', async () => {

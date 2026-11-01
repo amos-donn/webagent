@@ -250,6 +250,51 @@ async function readEditable(tabId) {
     return list.find(item => item.password) || list.find(item => item.kind === 'editable') || list.find(item => item.kind === 'frame') || list[0] || { kind: 'none', value: null, password: false };
   } catch { return { kind: 'none', value: null, password: false }; }
 }
+// The purple outline the panel draws over a field while Gemini writes into it. These run inside the
+// page, so each one is self-contained and touches no outer variable.
+function writeBoxShow(x, y) {
+  const id = 'webagent-write-box', styleId = 'webagent-write-box-style';
+  document.getElementById(id)?.remove();
+  document.getElementById(styleId)?.remove();
+  const hit = document.elementFromPoint(x, y);
+  const target = hit?.closest('input,textarea,[contenteditable=""],[contenteditable="true"],[role="textbox"]') || hit;
+  const rect = target?.getBoundingClientRect();
+  if (!rect || rect.width < 2 || rect.height < 2) return false;
+  const style = document.createElement('style');
+  style.id = styleId;
+  style.textContent = `#${id}{position:fixed;pointer-events:none;z-index:2147483647;border:2px solid #a855f7;border-radius:10px;box-shadow:0 0 0 4px rgba(168,85,247,.16),0 10px 30px rgba(76,29,149,.22);background:rgba(168,85,247,.05);transition:opacity .16s ease}`
+    + `#${id} .wa-chip{position:absolute;top:-29px;left:-2px;display:flex;align-items:center;gap:6px;background:#6d28d9;color:#fff;font:600 11px/1 -apple-system,Arial,sans-serif;padding:7px 9px;border-radius:8px;white-space:nowrap;box-shadow:0 4px 14px rgba(76,29,149,.3)}`
+    + `#${id} .wa-chip::before{content:"";width:6px;height:6px;border-radius:50%;background:#d8b4fe;box-shadow:0 0 8px #d8b4fe}`
+    + `#${id} .wa-skel{display:flex;flex-direction:column;gap:8px;padding:12px 10px}`
+    + `#${id} .wa-skel i{display:block;height:8px;border-radius:5px;background:linear-gradient(90deg,rgba(168,85,247,.16) 25%,rgba(168,85,247,.4) 50%,rgba(168,85,247,.16) 75%);background-size:200% 100%;animation:wa-shimmer 1.2s linear infinite}`
+    + `#${id} .wa-skel i:nth-child(2){width:92%}#${id} .wa-skel i:nth-child(3){width:64%}@keyframes wa-shimmer{to{background-position:-200% 0}}`;
+  document.head.appendChild(style);
+  const box = document.createElement('div');
+  box.id = id;
+  box.style.left = `${Math.max(Math.round(rect.left) - 6, 0)}px`;
+  box.style.top = `${Math.max(Math.round(rect.top) - 6, 0)}px`;
+  box.style.width = `${Math.round(rect.width) + 12}px`;
+  box.style.height = `${Math.round(rect.height) + 12}px`;
+  const chip = document.createElement('span'); chip.className = 'wa-chip'; chip.textContent = 'Gemini is writing…';
+  const skeleton = document.createElement('div'); skeleton.className = 'wa-skel';
+  for (let i = 0; i < 3; i++) skeleton.append(document.createElement('i'));
+  box.append(chip, skeleton);
+  document.documentElement.appendChild(box);
+  return true;
+}
+function writeBoxProgress(chars) {
+  const box = document.getElementById('webagent-write-box');
+  if (!box) return false;
+  const chip = box.querySelector('.wa-chip');
+  if (chip) chip.textContent = chars ? `Writing · ${chars.toLocaleString()} characters` : 'Gemini is writing…';
+  if (chars) box.querySelector('.wa-skel')?.remove();
+  return true;
+}
+function writeBoxHide() {
+  document.getElementById('webagent-write-box')?.remove();
+  document.getElementById('webagent-write-box-style')?.remove();
+  return true;
+}
 const KEY_MAP = {
   Enter: { code: 'Enter', vk: 13, text: '\r' }, Escape: { code: 'Escape', vk: 27, text: 'Escape' }, Tab: { code: 'Tab', vk: 9, text: '\t' },
   Backspace: { code: 'Backspace', vk: 8 }, Delete: { code: 'Delete', vk: 46 }, Insert: { code: 'Insert', vk: 45 }, Space: { code: 'Space', vk: 32, text: ' ' },
@@ -344,14 +389,99 @@ async function clickType(tab, action, width, height) {
     return { typed: 'insertText' };
   });
 }
+async function workerBase() {
+  const saved = await chrome.storage.local.get('worker').catch(() => ({}));
+  return String(saved.worker || 'https://webagent.amos-donn.workers.dev').replace(/\/+$/, '');
+}
+// Gemini writes the text into the field: one request, streamed in as it arrives, with a purple
+// outline and skeleton over the target so the user can see which field is being written.
+async function writeInto(fresh, action, message) {
+  const before = await signature(fresh.id);
+  const live = await liveViewportSafe(fresh.id);
+  let point;
+  if (action.ref) point = await refBox(fresh.id, action.ref, message.url);
+  else {
+    if (![action.x, action.y, message.width, message.height].every(Number.isFinite)) fail('INVALID_COORDINATES', 'The coordinates for that action are missing.');
+    point = scalePoint(action, message.width, message.height, live);
+  }
+  const label = (action.ref ? await refLabel(fresh.id, action.ref) : '') || 'the field';
+  const page = await readPage(fresh.id).catch(() => ({ text: '' }));
+  await chrome.scripting.executeScript({ target: { tabId: fresh.id }, func: writeBoxShow, args: [point.x, point.y] }).catch(() => {});
+  let produced = 0, failure = '';
+  try {
+    const outcome = await debug(fresh.id, async target => {
+      await clickPoint(target, point);
+      await sleep(160);
+      const focused = await readEditable(fresh.id);
+      if (focused.password) fail('PASSWORD_FIELD', 'Password and login fields are blocked.');
+      if (action.replace) await pressKey(target, 'Control+A').catch(() => {});
+      const response = await fetch(`${await workerBase()}/write`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          goal: message.goal || '', brief: action.brief, field: label,
+          existing: focused.kind === 'editable' ? String(focused.value || '').slice(0, 12000) : '',
+          context: String(page.text || '').slice(0, 12000), url: fresh.url
+        })
+      });
+      if (!response.ok || !response.body) {
+        const detail = await response.json().catch(() => ({}));
+        fail('WRITE_FAILED', detail.error || `Gemini could not write that (${response.status}).`);
+      }
+      const insert = async piece => {
+        if (!piece) return;
+        await chrome.debugger.sendCommand(target, 'Input.insertText', { text: piece });
+        produced += piece.length;
+        await chrome.scripting.executeScript({ target: { tabId: fresh.id }, func: writeBoxProgress, args: [produced] }).catch(() => {});
+        await sleep(45);
+      };
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '', pending = '';
+      const flush = async force => {
+        while (pending.length) {
+          if (!force && pending.length < 90) return;
+          let cut = force ? Math.min(pending.length, 400) : 90;
+          if (!force) { const space = pending.lastIndexOf(' ', cut); if (space > 40) cut = space + 1; }
+          const piece = pending.slice(0, cut);
+          pending = pending.slice(cut);
+          await insert(piece);
+        }
+      };
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const events = buffer.split('\n\n');
+        buffer = events.pop() || '';
+        for (const raw of events) {
+          const line = raw.split('\n').find(part => part.startsWith('data:'));
+          if (!line) continue;
+          let payload;
+          try { payload = JSON.parse(line.slice(5).trim()); } catch { continue; }
+          if (payload.error) failure = String(payload.error);
+          if (typeof payload.text === 'string') { pending += payload.text; await flush(false); }
+        }
+      }
+      await flush(true);
+      return { editable: focused.kind === 'editable' };
+    });
+    if (!produced) fail('WRITE_FAILED', failure || 'Gemini returned no text for that field.');
+    const after = await settle(fresh.id, before);
+    const verified = before && after ? before !== after : null;
+    return { generated: produced, via: 'stream', typed: outcome.editable ? 'generated' : 'keys', effect: { verified }, code: verified === false ? 'NO_EFFECT' : undefined };
+  } finally {
+    await chrome.scripting.executeScript({ target: { tabId: fresh.id }, func: writeBoxHide }).catch(() => {});
+  }
+}
 async function guardAction(tabId, action, message) {
   const allow = Array.isArray(message.allow) ? message.allow.filter(value => /^https?:\/\//.test(value)) : [];
   if (action.type === 'navigate' && allow.length && !allow.includes(originOf(action.url))) return { notice: `This task now includes ${originOf(action.url)}.` };
-  if (!['click', 'type', 'fill'].includes(action.type)) return;
+  if (!['click', 'type', 'write', 'fill'].includes(action.type)) return;
   const labels = [];
   if (action.ref) labels.push(await refLabel(tabId, action.ref));
   if (action.type === 'fill' && Array.isArray(action.fields)) for (const field of action.fields) if (field.ref) labels.push(await refLabel(tabId, field.ref));
-  const text = `${labels.join(' ')} ${action.description || ''} ${action.text || ''} ${action.submit ? 'submit' : ''}`;
+  const text = `${labels.join(' ')} ${action.description || ''} ${action.text || ''} ${action.brief || ''} ${action.submit ? 'submit' : ''}`;
   // Match the goal, the plan titles and the chat so far, by meaning rather than by exact wording.
   const intent = `${message.goal || ''} ${message.intent || ''}`;
   const groups = INTENTS.filter(group => group.label.test(text));
@@ -384,6 +514,10 @@ async function actOnTab(fresh, action, message) {
     }
     const after = await settle(fresh.id, before);
     return { fields: results, effect: { verified: before && after ? before !== after : null }, notice: gate?.notice };
+  }
+  if (action.type === 'write') {
+    const outcome = await writeInto(fresh, action, message);
+    return { ...outcome, notice: gate?.notice };
   }
   const before = await signature(fresh.id);
   if (action.type === 'scroll') {
@@ -488,7 +622,7 @@ async function handle(message) {
     if (!samePage(tab.url, message.url)) fail('PAGE_CHANGED', 'That page changed. Observe it again.');
     const action = message.action;
     if (action?.type === 'think') return {};
-    if (!action || !['click', 'type', 'read', 'scroll', 'wait', 'navigate', 'key', 'fill'].includes(action.type)) throw new Error('Unknown action.');
+    if (!action || !['click', 'type', 'write', 'read', 'scroll', 'wait', 'navigate', 'key', 'fill'].includes(action.type)) throw new Error('Unknown action.');
     await chrome.tabs.update(tab.id, { active: true });
     await sleep(250);
     const fresh = await getTab(tab.id);
