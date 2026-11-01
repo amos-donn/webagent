@@ -683,6 +683,7 @@ $('stop').addEventListener('click', () => { stop(); notify('Workflow stopped. An
 $('worker').addEventListener('change', async () => { await chrome.storage.local.set({ worker: $('worker').value.trim().replace(/\/$/, '') }); });
 $('bridge-toggle').addEventListener('change', async () => { try { const out = await send('bridge', { on: $('bridge-toggle').checked }); notify(out.connected ? 'Bridge on. Start node bridge/server.mjs to accept MCP clients.' : 'Bridge off.'); } catch (e) { notify(e.message || 'Could not toggle the bridge.', true); } });
 $('pointer-toggle').addEventListener('change', async () => { await chrome.storage.local.set({ pointer: $('pointer-toggle').checked }); notify($('pointer-toggle').checked ? 'Pointer on: a purple cursor shows where the agent clicks.' : 'Pointer off.'); });
+chrome.runtime.onMessage.addListener(message => { if (message && message.type === 'pointerBlocked') notify('Pointer is on, but this page blocks the cursor overlay — the click still went ahead.', true); });
 
 (async () => {
   const saved = await chrome.storage.local.get(['worker', 'chats', 'activeChat', 'mode', 'planMode', 'lastShot', 'skills', 'bridge', 'pointer']);

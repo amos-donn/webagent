@@ -363,7 +363,7 @@ function pointerMove(x, y) {
     const root = host.attachShadow({ mode: 'open' });
     const style = document.createElement('style');
     style.textContent = '.wrap{position:fixed;left:0;top:0;width:0;height:0;will-change:transform}'
-      + '.arrow{position:absolute;left:-4.2px;top:-2.5px;width:20px;height:20px;transform-origin:4.2px 2.5px;filter:drop-shadow(0 2px 5px rgba(76,29,149,.4));opacity:0}'
+      + '.arrow{position:absolute;left:-5px;top:-3px;width:24px;height:24px;transform-origin:5px 3px;filter:drop-shadow(0 2px 6px rgba(76,29,149,.55));opacity:0}'
       + '.ring{position:absolute;left:-32px;top:-32px;width:64px;height:64px;border-radius:50%;border:2px solid rgba(168,85,247,.85);background:radial-gradient(circle,rgba(168,85,247,.3),rgba(168,85,247,0) 70%);opacity:0}';
     const svg = 'http://www.w3.org/2000/svg';
     const wrap = document.createElement('div'); wrap.className = 'wrap';
@@ -392,7 +392,12 @@ function pointerMove(x, y) {
     if (!still) arrow.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 180, easing: 'ease-out' });
     return 0;
   }
-  const ms = still ? 0 : Math.min(360, Math.max(140, Math.round(Math.hypot(x - from.x, y - from.y) * 0.9)));
+  // Reduced motion shortens the journey instead of removing it: a zero-length slide reads as "no
+  // cursor at all", which defeats the whole point of drawing one.
+  const distance = Math.hypot(x - from.x, y - from.y);
+  const ms = still
+    ? Math.min(110, Math.max(60, Math.round(distance * 0.25)))
+    : Math.min(360, Math.max(140, Math.round(distance * 0.9)));
   arrow.style.opacity = '1';
   wrap.animate(
     [{ transform: `translate3d(${from.x}px,${from.y}px,0)` }, { transform: to }],
@@ -407,7 +412,7 @@ function pointerPress() {
   const ring = root.querySelector('.ring'), arrow = root.querySelector('.arrow');
   if (!ring || !arrow) return false;
   if (matchMedia('(prefers-reduced-motion: reduce)').matches) {
-    ring.animate([{ opacity: .85 }, { opacity: 0 }], { duration: 200 });
+    ring.animate([{ transform: 'scale(.35)', opacity: .9 }, { transform: 'scale(.85)', opacity: 0 }], { duration: 260, easing: 'ease-out' });
     return true;
   }
   ring.animate(
@@ -430,11 +435,18 @@ async function pointerEnabled() {
   const saved = await chrome.storage.local.get('pointer').catch(() => ({}));
   return saved.pointer !== false;
 }
+let pointerTold = false;
 async function pointerTo(tabId, point) {
   try {
     const [{ result: ms }] = await chrome.scripting.executeScript({ target: { tabId }, func: pointerMove, args: [point.x, point.y] });
     if (Number.isFinite(ms) && ms > 0) await sleep(Math.min(ms, 400));
-  } catch { /* a page that blocks injection simply gets no cursor */ }
+  } catch {
+    // Failing silently is why "I see no cursor" has no explanation. Say it once, then keep working.
+    if (!pointerTold) {
+      pointerTold = true;
+      chrome.runtime.sendMessage({ type: 'pointerBlocked' }).catch(() => {});
+    }
+  }
 }
 function pointerClick(tabId) {
   chrome.scripting.executeScript({ target: { tabId }, func: pointerPress }).catch(() => {});
