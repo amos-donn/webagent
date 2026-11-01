@@ -46,6 +46,21 @@ button.plan-mark:hover { opacity: .75; }
 .send.stop .ph{width:26px;height:26px}
 .footnote{margin:7px 4px 0;text-align:center}
 .message.current{display:flex;align-items:center;gap:6px;color:#4e6554}
+
+/* The report the run ends on: verdict, what happened, what did not. */
+.message.report{border-left:3px solid var(--green);padding:13px 14px 12px}
+.message.report.partial{border-left-color:#c08a2c}
+.message.report.failed{border-left-color:#b4544a}
+.message.report.unknown{border-left-color:#9aa79b}
+.report-head{display:flex;align-items:center;gap:7px;font-size:13px;line-height:1.4}
+.report-badge{width:21px;height:21px;border-radius:7px;display:grid;place-items:center;flex:none;background:#e9f1e4;color:#2c5948}
+.message.report.partial .report-badge{background:#fbf0dc;color:#8a5c12}
+.message.report.failed .report-badge{background:#fbe6e2;color:#96443a}
+.message.report.unknown .report-badge{background:#eef1ec;color:#6d7d70}
+.message.report p{margin:7px 0 0;font-size:12.5px;line-height:1.55;color:#3f5747}
+.report-list{margin-top:11px}
+.report-list ul{margin:5px 0 0;padding-left:16px;display:flex;flex-direction:column;gap:4px}
+.report-list li{font-size:12px;line-height:1.45;color:#4e6554}
 .loading-icon{color:#4b7a5c}
 .loading-icon.spin .ph{animation:spin .9s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}

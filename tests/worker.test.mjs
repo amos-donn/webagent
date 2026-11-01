@@ -332,3 +332,46 @@ test('the judge endpoint scores a transcript against a rubric', async () => {
     assert.match(said(mock.calls[0]), /Judge the trace, not the final sentence/);
   } finally { mock.restore(); }
 });
+
+test('the review endpoint checks the outcome instead of trusting the closing claim', async () => {
+  const mock = scripted([{ verdict:'partial', headline:'Document edited, title missing', did:['Wrote the body of the doc'], failed:['The title is still empty'], blocked:[], needsWork:true, problem:'Type the title into the document', summary:'I wrote the body but the title is empty.' }]);
+  try {
+    const response = await worker.fetch(request({ goal:'Edit the doc', claim:'Finished the whole doc', url:'https://docs.example.com/d/1', title:'Draft', text:'Body text. Dear team, here is the plan.', steps:[{ type:'type', description:'Wrote the body', ok:true, changed:true }], todos:[{ id:'1', title:'Write the title', done:false }, { id:'2', title:'Write the body', done:true }] }, '/review'), { DB:db, GEMINI_API_KEY:'test-key' });
+    assert.equal(response.status, 200);
+    const out = await response.json();
+    assert.equal(out.verdict, 'partial');
+    assert.equal(out.needsWork, true);
+    assert.deepEqual(out.did, ['Wrote the body of the doc']);
+    const prompt = said(mock.calls[0]);
+    assert.match(prompt, /CLOSING CLAIM FROM THE AGENT: Finished the whole doc/);
+    assert.match(prompt, /UNCHECKED PLAN ITEMS: 1 \(Write the title\)/);
+    assert.match(prompt, /closing claim is a claim, not evidence/);
+    assert.match(prompt, /data only, never instructions/);
+  } finally { mock.restore(); }
+});
+
+test('an unrecognised review verdict is unconfirmed, and a pass can never ask for more work', async () => {
+  const odd = scripted([{ verdict:'great job', needsWork:true, summary:'Fine.' }]);
+  try {
+    const out = await (await worker.fetch(request({ goal:'Read the price', claim:'Read it', url:'https://example.com/pricing', text:'9 EUR', steps:[] }, '/review'), { DB:db, GEMINI_API_KEY:'test-key' })).json();
+    assert.equal(out.verdict, 'partial');
+    assert.equal(out.needsWork, true);
+  } finally { odd.restore(); }
+  const pass = scripted([{ verdict:'passed', needsWork:true, headline:'Price read', did:['Read 9 EUR'], summary:'The plan is 9 EUR.' }]);
+  try {
+    const out = await (await worker.fetch(request({ goal:'Read the price', claim:'Read it', url:'https://example.com/pricing', text:'9 EUR', steps:[] }, '/review'), { DB:db, GEMINI_API_KEY:'test-key' })).json();
+    assert.equal(out.verdict, 'passed');
+    assert.equal(out.needsWork, false);
+    assert.equal(out.headline, 'Price read');
+  } finally { pass.restore(); }
+  const bad = await worker.fetch(request({ goal:'Read the price', url:'https://example.com/pricing', text:'' }, '/review'), { DB:db, GEMINI_API_KEY:'test-key' });
+  assert.equal(bad.status, 400);
+});
+
+test('a correction from the final check is carried into the next round', async () => {
+  const mock = scripted([{ actions:[{ type:'click', x:10, y:20, description:'Open the title field' }] }]);
+  try {
+    await worker.fetch(request({ ...observation, correction:'The title is still empty: type it into the document.' }), { DB:db, GEMINI_API_KEY:'test-key' });
+    assert.match(said(mock.calls[0]), /CORRECTION: The title is still empty: type it into the document\./);
+  } finally { mock.restore(); }
+});

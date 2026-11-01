@@ -49,6 +49,78 @@ function grow() { const el = $('goal'); el.style.height = 'auto'; el.style.heigh
 // There is no Continue button any more: a dead end stops the run and puts the task back in the box.
 function halt(run, message) { const goal = run?.goal || ''; stop(); if (goal) { $('goal').value = goal; grow(); } if (message) notify(message, true); }
 
+/* ---------- final check ---------- */
+const VERDICTS = {
+  passed: { icon: 'check', label: 'Checked and done' },
+  partial: { icon: 'warning-circle', label: 'Partly done' },
+  failed: { icon: 'x', label: 'Did not work' },
+  unknown: { icon: 'info', label: 'Reported, not checked' }
+};
+function verdictOf(report) { return VERDICTS[report.verdict] ? report.verdict : 'unknown'; }
+function reportText(report) {
+  const section = (label, list) => Array.isArray(list) && list.length ? `\n${label}:\n${list.map(item => `- ${item}`).join('\n')}` : '';
+  return `${report.headline || VERDICTS[verdictOf(report)].label}\n\n${report.summary || ''}${section('What I did', report.did)}${section('What failed', report.failed)}${section('Could not do', report.blocked)}`.trim();
+}
+function reportCard(report) {
+  const verdict = verdictOf(report);
+  const card = document.createElement('div');
+  card.className = `message report ${verdict}`;
+  const head = document.createElement('div'); head.className = 'report-head';
+  const badge = document.createElement('span'); badge.className = 'report-badge'; setIcon(badge, VERDICTS[verdict].icon, 13);
+  const title = document.createElement('strong'); title.textContent = report.headline || VERDICTS[verdict].label;
+  head.append(badge, title); card.append(head);
+  if (report.summary) { const text = document.createElement('p'); text.textContent = report.summary; card.append(text); }
+  for (const [key, label] of [['did', 'What I did'], ['failed', 'What failed'], ['blocked', 'Could not do']]) {
+    const list = Array.isArray(report[key]) ? report[key] : [];
+    if (!list.length) continue;
+    const wrap = document.createElement('div'); wrap.className = 'report-list';
+    const heading = document.createElement('span'); heading.className = 'overline'; heading.textContent = label.toUpperCase();
+    const ul = document.createElement('ul');
+    for (const item of list) { const li = document.createElement('li'); li.textContent = item; ul.append(li); }
+    wrap.append(heading, ul); card.append(wrap);
+  }
+  return card;
+}
+// Before a run reports success it looks at the page again and has the model check its own work; a
+// failed check feeds back as a correction instead of ending the run, and the user always gets a report.
+async function finalCheck(run, claim, incomplete = []) {
+  if (workflow !== run) return;
+  loading('Checking the result', 'check');
+  $('loading-label').textContent = 'Checking the result against the page';
+  let shot = null;
+  try { shot = await send('observe', { tabId: run.actingTabId, activate: false }); } catch { /* the transcript still allows a report */ }
+  if (workflow !== run) return;
+  let report;
+  try {
+    report = await api('/review', {
+      goal: run.goal, claim: claim || '', todos: plan, steps: run.steps,
+      url: shot?.url || run.view?.url, title: shot?.title, text: shot?.text || '',
+      ...(shot ? { image: shot.image, width: shot.width, height: shot.height } : {})
+    });
+  } catch (e) {
+    if (workflow !== run) return;
+    // A check that cannot run must not swallow the result: say so and report the claim as unverified.
+    report = { verdict: 'unknown', headline: 'Finished without a final check', did: [], failed: [], blocked: [], needsWork: false, summary: `${claim || 'The task finished.'} The final check could not run: ${e.message}` };
+  }
+  if (workflow !== run) return;
+  if (incomplete?.length) {
+    const titles = plan.filter(item => incomplete.includes(item.id)).map(item => `Could not finish: ${item.title}`);
+    report = { ...report, verdict: report.verdict === 'passed' ? 'partial' : report.verdict, blocked: [...(report.blocked || []), ...titles] };
+  }
+  if (report.needsWork && (run.checks || 0) < 2 && run.mode !== 'manual') {
+    run.checks = (run.checks || 0) + 1;
+    run.correction = report.problem || 'The final check did not confirm the goal.';
+    pushMessage('note', `Not done yet: ${run.correction} Going back to the page.`);
+    $('loading').hidden = true;
+    await next(run, shot || undefined);
+    return;
+  }
+  pushMessage('report', reportText(report), { report });
+  renderPlan();
+  stop();
+  notify(report.verdict === 'passed' ? 'Finished, and the result checked out.' : 'Finished without full confirmation — see the report.', report.verdict !== 'passed');
+}
+
 /* ---------- tabs ---------- */
 async function listTabs() { const { tabs } = await send('tabs'); tabCache = tabs; const ids = new Set(tabs.map(t => t.id)); if (!ids.has(actingTabId)) actingTabId = (tabs.find(t => t.active) || tabs[0])?.id ?? null; contextIds = contextIds.filter(id => ids.has(id) && id !== actingTabId); renderTabs(); return tabs; }
 function shortTitle(t) { const s = (t.title || t.url).trim(); return s.length > 60 ? s.slice(0, 60) + '…' : s; }
@@ -106,6 +178,7 @@ function renderMessage(message) {
     if (message.excerpt) { const excerpt = document.createElement('p'); excerpt.textContent = `Read: ${message.excerpt}`; details.append(excerpt); }
     return details;
   }
+  if (message.role === 'report') return reportCard(message.report || {});
   const el = document.createElement('div');
   el.className = `message ${message.role}`;
   el.textContent = message.text;
@@ -323,8 +396,9 @@ async function next(run, prefetched) {
   // Vision is a fallback: it is only attached for thin trees or when the model asks for it.
   const sendImage = run.wantShot || refs.length < 15;
   const started = performance.now();
-  const { actions, action, completed, incomplete, memory, needScreenshot, ms } = await api('/agent', { goal:run.goal, intent:[run.goal, ...plan.map(item => item.title)].join('\n'), todos:plan, steps:run.steps, url:shot.url, title:shot.title, text:shot.text, ...(sendImage ? { image: shot.image } : {}), width:image.naturalWidth, height:image.naturalHeight, elements, refs, memory: run.memory || undefined, stalled:run.stalled, automatic:run.mode === 'autopilot', contexts:extra });
+  const { actions, action, completed, incomplete, memory, needScreenshot, ms } = await api('/agent', { goal:run.goal, intent:[run.goal, ...plan.map(item => item.title)].join('\n'), todos:plan, steps:run.steps, url:shot.url, title:shot.title, text:shot.text, ...(sendImage ? { image: shot.image } : {}), width:image.naturalWidth, height:image.naturalHeight, elements, refs, memory: run.memory || undefined, stalled:run.stalled, automatic:run.mode === 'autopilot', correction: run.correction || undefined, contexts:extra });
   if (memory) run.memory = memory;
+  run.correction = '';
   if (needScreenshot && !run.wantShot) { run.wantShot = true; return next(run); }
   run.wantShot = false;
   const elapsed = ms ?? Math.round(performance.now() - started);
@@ -334,19 +408,14 @@ async function next(run, prefetched) {
   const batch = Array.isArray(actions) && actions.length ? actions : (action ? [action] : []);
   const finish = batch.find(item => item.type === 'done');
   if (finish) {
-    pushMessage('agent', finish.summary || 'Workflow complete.');
-    if (incomplete?.length) {
+    if (incomplete?.length && run.mode !== 'manual' && (run.keepGoing || 0) < 4) {
       const titles = plan.filter(item => incomplete.includes(item.id)).map(item => item.title);
-      if (run.mode !== 'manual' && (run.keepGoing || 0) < 4) {
-        run.keepGoing = (run.keepGoing || 0) + 1;
-        pushMessage('note', `${titles.length} plan step${titles.length === 1 ? '' : 's'} still open (${titles.join(' · ')}), so I’ll keep going instead of finishing.`);
-        $('loading').hidden = true;
-        return next(run);
-      }
-      halt(run, `Stopped with ${titles.length} unchecked plan step${titles.length === 1 ? '' : 's'}: ${titles.join(' · ')}. The task is back in the box for another pass.`);
-      return;
+      run.keepGoing = (run.keepGoing || 0) + 1;
+      pushMessage('note', `${titles.length} plan step${titles.length === 1 ? '' : 's'} still open (${titles.join(' · ')}), so I’ll keep going instead of finishing.`);
+      $('loading').hidden = true;
+      return next(run);
     }
-    const run_ = run; stop(); notify('Workflow complete.'); return run_;
+    return finalCheck(run, finish.summary || '', incomplete || []);
   }
   run.queue = batch.slice();
   const risky = run.queue.map(riskyAction).find(Boolean) || '';

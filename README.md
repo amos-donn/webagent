@@ -36,6 +36,12 @@ A checklist is optional: the planner returns no steps for short tasks, so a one-
 
 The message box is one tall field with the mode picker and the send button inside it, and nothing else stacked underneath. While a task runs, the send button is replaced by a large stop control in the same corner. There is no Continue button: the agent carries on to the next step by itself, and only a dead end stops the run and drops the task back into the box to resend. All panel icons are [Phosphor](https://phosphoricons.com) geometry vendored in `extension/icons.js`, so nothing is fetched from the network.
 
+## The final check and the report
+
+When the model says the task is done, the run does not end there. The panel re-reads the tab and posts the whole run to `/review`: the goal, the closing claim, the plan, every step, and a fresh screenshot plus page text. A separate model call then judges the **page**, not the claim — did the text it was supposed to read actually appear, is the field really filled, does the Google Doc it edited show the new content — and answers with `passed`, `partial` or `failed`.
+
+If the check finds missing work that a browser action could still fix, that verdict is fed back as a correction and the agent goes back to the page, up to two extra rounds. When it finishes either way, the chat ends with a report card: the verdict, two or three sentences on what happened, then *What I did*, *What failed* and *Could not do* lists. A check that cannot run (rate limit, offline) is reported as unverified rather than pretending to pass, and unchecked plan items are listed under *Could not do*. The report is part of the chat, so it survives reloads and is included in `Export .md`.
+
 The mode picker mirrors the three modes Claude in Chrome offers: **Ask each round** pauses for approval, **Auto** runs freely but pauses before steps that look irreversible (paying, deleting, sending, submitting, sharing, uploading, or typing password/card-like text), and **Autopilot** never pauses. The starred tab is added to a `webagent` tab group when a task starts, and the eye button shows the exact screenshot the last decision was made from.
 
 ## Accessibility refs, safety boundary, skills, evals and the MCP bridge
