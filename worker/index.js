@@ -1,6 +1,8 @@
 const DEFAULT_MODEL = 'google/gemini-3.5-flash-lite';
 const ACTION_TYPES = ['think', 'click', 'type', 'read', 'scroll', 'wait', 'navigate', 'key', 'fill', 'done'];
-const KEYS = ['Enter', 'Escape', 'Tab', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'PageUp', 'PageDown', 'Home', 'End', 'Backspace'];
+const KEY_NAMES = ['Enter', 'Escape', 'Tab', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'PageUp', 'PageDown', 'Home', 'End', 'Backspace', 'Delete', 'Insert', 'Space'];
+const KEY_ALIASES = { esc: 'Escape', return: 'Enter', space: 'Space', up: 'ArrowUp', down: 'ArrowDown', left: 'ArrowLeft', right: 'ArrowRight', pgup: 'PageUp', pgdn: 'PageDown', pageup: 'PageUp', pagedown: 'PageDown', del: 'Delete', insert: 'Insert', home: 'Home', end: 'End', tab: 'Tab', enter: 'Enter', backspace: 'Backspace' };
+const MODIFIER_NAMES = { ctrl: 'Control', control: 'Control', shift: 'Shift', alt: 'Alt', option: 'Alt', meta: 'Meta', cmd: 'Meta', command: 'Meta' };
 const BATCHABLE_EXCLUSIONS = ['think', 'read', 'wait', 'navigate', 'done', 'fill'];
 const MAX_BATCH = 4;
 const MAX_FIELDS = 12;
@@ -8,6 +10,23 @@ const REF = /^e\d{1,3}$/;
 const INJECTION = /(ignore\s+(all\s+|any\s+)?(the\s+)?(previous|prior|above|earlier)\s+(instructions?|prompts?|messages?)|disregard\s+(the\s+)?(system|previous|above)|you\s+are\s+now\s+(a|an|in)|new\s+instructions?\s*:|system\s+prompt|send\s+(the\s+|this\s+)?(file|data|email|credentials|password)|exfiltrat|do\s+not\s+tell\s+the\s+user|the\s+user\s+(has\s+)?(already\s+)?approved)/i;
 const json = (data, status = 200) => new Response(JSON.stringify(data), { status, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'Content-Type', 'Access-Control-Allow-Methods': 'GET, POST, OPTIONS' } });
 const clip = (value, max) => String(value ?? '').slice(0, max);
+// A person navigates by keyboard (/ for search, Shift+Tab, Control+K), so a key is a named key,
+// any printable character, or a chord of up to two modifiers plus either of those.
+function readKey(value) {
+  if (typeof value !== 'string' || !value.trim() || value.length > 40) throw new Error('Unsupported key.');
+  const parts = value.split('+').map(part => part.trim()).filter(Boolean);
+  if (!parts.length || parts.length > 3) throw new Error('Unsupported key.');
+  const mods = [];
+  for (const part of parts.slice(0, -1)) {
+    const name = MODIFIER_NAMES[part.toLowerCase()];
+    if (!name || mods.includes(name)) throw new Error('Unsupported modifier key.');
+    mods.push(name);
+  }
+  const raw = parts[parts.length - 1];
+  const base = KEY_ALIASES[raw.toLowerCase()] || (KEY_NAMES.includes(raw) ? raw : (raw.length === 1 && raw >= ' ' && raw <= '~' ? raw : ''));
+  if (!base) throw new Error(`Unsupported key: ${clip(raw, 20)}.`);
+  return [...mods, base].join('+');
+}
 const modelName = env => (env.OPENROUTER_MODEL || '').trim() || DEFAULT_MODEL;
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function limited(db, key, limit, duration) {
@@ -123,7 +142,7 @@ function readAction(action, input) {
   if (action.type === 'type' && (typeof action.text !== 'string' || action.text.length > 5000)) throw new Error('The proposed text is invalid.');
   if (action.type === 'scroll' && !['up', 'down'].includes(action.direction)) throw new Error('Invalid scroll direction.');
   if (action.type === 'wait' && (!Number.isFinite(action.seconds) || action.seconds < 1 || action.seconds > 10)) throw new Error('Invalid wait duration.');
-  if (action.type === 'key' && !KEYS.includes(action.key)) throw new Error('Unsupported key.');
+  if (action.type === 'key') action.key = readKey(action.key);
   if (action.type === 'fill') {
     if (!Array.isArray(action.fields) || !action.fields.length || action.fields.length > MAX_FIELDS) throw new Error(`A fill needs 1 to ${MAX_FIELDS} fields.`);
     action.fields = action.fields.map(field => {
@@ -180,7 +199,9 @@ function agentPrompt(input, page, todos, steps, contexts, elements, refs, correc
     'Work on the next unchecked plan item. Keep each action small: one click, one field, one scroll.',
     'Prefer [ref=…] targets from the accessibility tree: they work off-screen and survive scrolling. Use x,y only when no ref fits.',
     'Never repeat an action that the history marks as failed, blocked or as causing no page change — try a different element, scroll, read, or send key events.',
-    'Use read when the visible text is not enough, wait when the page is still loading, and key to press Enter/Escape/Tab.',
+    'Use read when the visible text is not enough, wait when the page is still loading, and key for keyboard input.',
+    'Keyboard shortcuts are part of the page, not a workaround. Many sites focus their search box with "/" or "s", close overlays with Escape, move with Tab/Shift+Tab, scroll with Space and Shift+Space, jump with Home/End and PageUp/PageDown, and pick a result with the arrow keys plus Enter. Prefer a visible control when the tree shows one; when it does not, or when a click had NO_EFFECT, use the shortcut a person would try.',
+    'Send a chord in one key action ("Control+K", not Control then K), and focus a page-level shortcut target first by clicking it, tabbing to it, or pressing the site shortcut.',
     'To type into a rich editor (Google Docs, Word Online, email composers) send one type action with the full text.',
     'If a cookie banner, modal or overlay blocks the target, dismiss it first.',
     'Only check a plan item off when a step in the history actually completed it. A failed, blocked or no-change step is not proof. Never fabricate completion.',
@@ -200,7 +221,7 @@ Every action needs a "description" (what and why). Failures come back with a cod
 - click: {"type":"click","ref":"e12","description":"..."} or {"type":"click","x":number,"y":number,"description":"..."}
 - type: {"type":"type","ref":"e12","text":"...","submit":true|false,"description":"..."}
 - fill: {"type":"fill","fields":[{"ref":"e3","text":"..."},{"ref":"e4","text":"..."}],"description":"..."} for several independent fields in one call (always on its own)
-- key: {"type":"key","key":"Enter","description":"..."}
+- key: {"type":"key","key":"Enter","description":"..."} — one named key (Enter, Escape, Tab, arrows, PageUp/Down, Home, End, Backspace, Delete, Space), any printable character (for example "/" or "?"), or a chord: "Control+K", "Shift+Tab", "Meta+Enter", "Control+A"
 - scroll: {"type":"scroll","direction":"up"|"down","description":"..."}
 - read: {"type":"read","description":"..."}
 - wait: {"type":"wait","seconds":1-10,"description":"..."}

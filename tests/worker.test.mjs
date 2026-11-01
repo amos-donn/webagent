@@ -104,6 +104,16 @@ test('key actions validate and invalid ones are retried then rejected', async ()
     const response = await worker.fetch(request({ ...observation, steps:[{ type:'type', description:'typed search', ok:true }] }), { DB:db, OPENROUTER_API_KEY:'test-key' });
     assert.equal((await response.json()).action.key, 'Enter');
   } finally { ok.restore(); }
+  const chord = scripted([{ type:'key', key:'Control+K', description:'Focus the site search' }]);
+  try {
+    const response = await worker.fetch(request(observation), { DB:db, OPENROUTER_API_KEY:'test-key' });
+    assert.equal((await response.json()).action.key, 'Control+K');
+  } finally { chord.restore(); }
+  const slash = scripted([{ type:'key', key:'/', description:'Open the search box with the site shortcut' }]);
+  try {
+    const response = await worker.fetch(request(observation), { DB:db, OPENROUTER_API_KEY:'test-key' });
+    assert.equal((await response.json()).action.key, '/');
+  } finally { slash.restore(); }
   const bad = scripted([{ type:'key', key:'F5', description:'Refresh' }]);
   try {
     const response = await worker.fetch(request(observation), { DB:db, OPENROUTER_API_KEY:'test-key' });
@@ -271,6 +281,7 @@ test('the prompt judges intent and refuses to quit over one blocked step', async
     assert.match(prompt, /goal states intent, not a checklist of permitted words/);
     assert.match(prompt, /Never end the run because one step failed or was blocked/);
     assert.match(prompt, /notice instead of an error/);
+    assert.match(prompt, /focus their search box with "\/"/);
   } finally { mock.restore(); }
 });
 

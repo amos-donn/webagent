@@ -250,13 +250,38 @@ async function readEditable(tabId) {
     return list.find(item => item.password) || list.find(item => item.kind === 'editable') || list.find(item => item.kind === 'frame') || list[0] || { kind: 'none', value: null, password: false };
   } catch { return { kind: 'none', value: null, password: false }; }
 }
-const KEY_MAP = { Enter: [13, 'Enter', '\r'], Escape: [27, 'Escape', 'Escape'], Tab: [9, 'Tab', '\t'], ArrowUp: [38, 'ArrowUp', ''], ArrowDown: [40, 'ArrowDown', ''], ArrowLeft: [37, 'ArrowLeft', ''], ArrowRight: [39, 'ArrowRight', ''], PageUp: [33, 'PageUp', ''], PageDown: [34, 'PageDown', ''], Home: [36, 'Home', ''], End: [35, 'End', ''], Backspace: [8, 'Backspace', ''] };
-async function pressKey(target, name) {
-  const entry = KEY_MAP[name];
-  if (!entry) throw new Error('Unsupported key.');
-  const [code, key, text] = entry;
-  await chrome.debugger.sendCommand(target, 'Input.dispatchKeyEvent', { type: 'keyDown', windowsVirtualKeyCode: code, key, ...(text ? { text } : {}) });
-  await chrome.debugger.sendCommand(target, 'Input.dispatchKeyEvent', { type: 'keyUp', windowsVirtualKeyCode: code, key });
+const KEY_MAP = {
+  Enter: { code: 'Enter', vk: 13, text: '\r' }, Escape: { code: 'Escape', vk: 27, text: 'Escape' }, Tab: { code: 'Tab', vk: 9, text: '\t' },
+  Backspace: { code: 'Backspace', vk: 8 }, Delete: { code: 'Delete', vk: 46 }, Insert: { code: 'Insert', vk: 45 }, Space: { code: 'Space', vk: 32, text: ' ' },
+  ArrowUp: { code: 'ArrowUp', vk: 38 }, ArrowDown: { code: 'ArrowDown', vk: 40 }, ArrowLeft: { code: 'ArrowLeft', vk: 37 }, ArrowRight: { code: 'ArrowRight', vk: 39 },
+  PageUp: { code: 'PageUp', vk: 33 }, PageDown: { code: 'PageDown', vk: 34 }, Home: { code: 'Home', vk: 36 }, End: { code: 'End', vk: 35 }
+};
+const KEY_ALIASES = { esc: 'Escape', return: 'Enter', space: 'Space', up: 'ArrowUp', down: 'ArrowDown', left: 'ArrowLeft', right: 'ArrowRight', pgup: 'PageUp', pgdn: 'PageDown', pageup: 'PageUp', pagedown: 'PageDown', del: 'Delete', backspace: 'Backspace', insert: 'Insert', home: 'Home', end: 'End', tab: 'Tab', enter: 'Enter' };
+const MODIFIER_BITS = { Alt: 1, Control: 2, Meta: 4, Shift: 8 };
+const MODIFIER_ALIASES = { ctrl: 'Control', control: 'Control', shift: 'Shift', alt: 'Alt', option: 'Alt', meta: 'Meta', cmd: 'Meta', command: 'Meta' };
+const PUNCTUATION = { '/': 'Slash', '?': 'Slash', '.': 'Period', ',': 'Comma', '-': 'Minus', '=': 'Equal', ';': 'Semicolon', "'": 'Quote', '[': 'BracketLeft', ']': 'BracketRight', '\\': 'Backslash', '`': 'Backquote' };
+// People navigate with shortcuts (/ for search, Shift+Tab, Control+K), so keys go out as real events.
+async function pressKey(target, spec) {
+  const parts = String(spec ?? '').split('+').map(part => part.trim()).filter(Boolean);
+  if (!parts.length || parts.length > 3) fail('UNSUPPORTED_KEY', 'Unsupported key.');
+  let modifiers = 0;
+  for (const part of parts.slice(0, -1)) {
+    const name = MODIFIER_ALIASES[part.toLowerCase()];
+    if (!name) fail('UNSUPPORTED_KEY', `Unsupported modifier: ${clip(part, 20)}.`);
+    modifiers |= MODIFIER_BITS[name];
+  }
+  const raw = parts[parts.length - 1];
+  const named = KEY_MAP[raw] || KEY_MAP[KEY_ALIASES[raw.toLowerCase()]];
+  const printable = !named && raw.length === 1 && raw >= ' ' && raw <= '~' ? raw : null;
+  if (!named && !printable) fail('UNSUPPORTED_KEY', `Unsupported key: ${clip(raw, 20)}.`);
+  const shifted = printable && ((modifiers & MODIFIER_BITS.Shift) !== 0 || /[A-Z]/.test(printable));
+  const key = named ? (named.code === 'Space' ? ' ' : named.code) : (shifted ? printable.toUpperCase() : printable);
+  const text = named ? named.text : ((modifiers & ~MODIFIER_BITS.Shift) !== 0 ? undefined : key);
+  const code = named ? named.code : (PUNCTUATION[printable] || (/[a-z]/i.test(printable) ? `Key${printable.toUpperCase()}` : (/[0-9]/.test(printable) ? `Digit${printable}` : '')));
+  const vk = named ? named.vk : printable.toUpperCase().charCodeAt(0);
+  const event = { key, code, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk, modifiers };
+  await chrome.debugger.sendCommand(target, 'Input.dispatchKeyEvent', { type: text ? 'keyDown' : 'rawKeyDown', ...event, ...(text ? { text, unmodifiedText: printable || text } : {}) });
+  await chrome.debugger.sendCommand(target, 'Input.dispatchKeyEvent', { type: 'keyUp', ...event });
 }
 // Canvas editors ignore paste-style inserts, so every character is delivered as a real key event instead.
 async function typeKeys(target, text) {
@@ -361,11 +386,21 @@ async function actOnTab(fresh, action, message) {
     return { fields: results, effect: { verified: before && after ? before !== after : null }, notice: gate?.notice };
   }
   const before = await signature(fresh.id);
-  if (action.type === 'key') await debug(fresh.id, target => pressKey(target, action.key));
-  else if (action.type === 'scroll') {
+  if (action.type === 'scroll') {
     if (!['up', 'down'].includes(action.direction)) throw new Error('Invalid scroll direction.');
     await chrome.scripting.executeScript({ target: { tabId: fresh.id }, func: direction => window.scrollBy({ top: direction === 'up' ? -Math.round(innerHeight * .75) : Math.round(innerHeight * .75), behavior: 'instant' }), args: [action.direction] });
-  } else if (['click', 'type'].includes(action.type)) {
+    let after = await settle(fresh.id, before);
+    let via = 'pointer';
+    if (before && after && before === after) {
+      // Nested scrollers and keyboard-first pages ignore window.scrollBy, so fall back to the Space bar.
+      await debug(fresh.id, target => pressKey(target, action.direction === 'up' ? 'Shift+Space' : 'Space'));
+      const keyed = await settle(fresh.id, before);
+      if (before && keyed && before !== keyed) { after = keyed; via = 'keyboard'; }
+    }
+    return { via, effect: { verified: before && after ? before !== after : null }, code: before && after && before === after ? 'NO_EFFECT' : undefined, notice: gate?.notice };
+  }
+  if (action.type === 'key') await debug(fresh.id, target => pressKey(target, action.key));
+  else if (['click', 'type'].includes(action.type)) {
     let point;
     if (action.ref) point = await refBox(fresh.id, action.ref, message.url);
     else {

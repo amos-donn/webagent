@@ -44,6 +44,8 @@ The mode picker next to the send button mirrors the three modes Claude in Chrome
 
 **Safety.** Page text is wrapped in random `<<SNAP-…>>` delimiters, instruction-looking lines are removed before the model sees them, CSS-hidden text is dropped at extraction, cross-origin navigation extends the task's sites instead of stopping it, and consequential labels (`delete`, `pay`, `send`, …) are matched against the **intent** of your goal, the plan and the chat — not its exact wording — so "clean up my inbox" covers a Delete button. A matching step runs with a notice; only spending money or closing an account is refused (`BLOCKED_ACTION`) when autopilot runs unattended and the goal implies neither. Password fields are always blocked.
 
+**Keyboard.** Keys are sent as real key events, so the agent can use what a person would: `/` or `s` to focus a site's search, `Escape` to close a dialog, `Tab`/`Shift+Tab`, `Space`/`Shift+Space`, `Home`/`End`, `PageUp`/`PageDown`, arrow keys, plus any printable character and chords like `Control+K`, `Shift+Tab` or `Meta+Enter`. When a nested scroller ignores programmatic scrolling, `scroll` falls back to the Space bar.
+
 **Typed errors.** Failures return codes (`STALE_REF`, `NOT_ACTIONABLE`, `BLOCKED_ACTION`, `PAGE_CHANGED`, `NO_EFFECT`, `PASSWORD_FIELD`) which appear in the timeline and in the model's history. In Auto and Autopilot a failed step is feedback, not an ending: the run re-reads the page and tries another route (up to three consecutive retries) instead of handing control back after one obstacle.
 
 **Skills.** `/skill` distils the current run into a named, parameterised skill (secrets listed as parameters, values never stored) and `/` lists saved skills to replay.
