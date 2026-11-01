@@ -14,8 +14,15 @@ let mode = 'autopilot', planMode = 'auto', lastShot = '', skills = [];
 function notify(text, error = false) { $('notice').textContent = text; $('notice').classList.toggle('error', error); $('notice').hidden = false; }
 function setStatus(text) { $('status').textContent = text || ''; $('status').hidden = !text; }
 function baseUrl() { const url = new URL($('worker').value.trim()); if (url.username || url.password || url.search || url.hash || (url.protocol !== 'https:' && !(url.protocol === 'http:' && ['localhost','127.0.0.1'].includes(url.hostname)))) throw new Error('Use an HTTPS Worker URL or localhost.'); return url.origin + url.pathname.replace(/\/$/, ''); }
-function originPattern(value) { const u = new URL(value); if (u.protocol !== 'https:' && !(u.protocol === 'http:' && ['localhost','127.0.0.1'].includes(u.hostname))) throw new Error('Only HTTPS and local pages are supported.'); return `${u.protocol}//${u.hostname}/*`; }
-async function permission(value) { const origins = [originPattern(value)]; if (!await chrome.permissions.contains({ origins }) && !await chrome.permissions.request({ origins })) throw new Error('Site access was not granted.'); }
+// Ask once for every site, not once per site: Chrome remembers this grant until you revoke it.
+const ALL_SITES = ['https://*/*', 'http://*/*'];
+let allSites = false;
+async function permission() {
+  if (allSites) return;
+  if (await chrome.permissions.contains({ origins: ALL_SITES })) { allSites = true; return; }
+  if (!await chrome.permissions.request({ origins: ALL_SITES })) throw new Error('Site access was not granted. Allow it once and the agent will not ask again.');
+  allSites = true;
+}
 async function activeUrl() { const [tab] = await chrome.tabs.query({ active: true, currentWindow: true }); if (!tab?.url) throw new Error('Select a webpage first.'); return tab.url; }
 async function send(type, data = {}) { const out = await chrome.runtime.sendMessage({ type, ...data }); if (out.error) throw Object.assign(new Error(out.error), { code: out.code || 'ERROR' }); return out.data; }
 async function api(path, data, retries = 2) {
@@ -287,12 +294,8 @@ async function next(run, prefetched) {
   if (!acting.supported) throw new Error('The acting tab is not supported. Pick an HTTPS page — Chrome internal pages are blocked.');
   run.actingTabId = acting.id;
   const contexts = tabCache.filter(t => run.contextIds.includes(t.id) && t.id !== acting.id && t.supported).slice(0, 5);
-  for (const t of [acting, ...contexts]) {
-    if (!await chrome.permissions.contains({ origins:[originPattern(t.url)] })) {
-      if (run.mode !== 'manual') { $('continue').hidden = false; $('loading').hidden = true; setStatus(''); notify(`“${shortTitle(t)}” needs site access. Select Continue to grant permission.`); return; }
-      await permission(t.url); if (workflow !== run) return;
-    }
-  }
+  try { await permission(); }
+  catch (e) { if (workflow !== run) return; $('continue').hidden = false; $('loading').hidden = true; setStatus(''); notify(e.message, true); return; }
   let shot = prefetched;
   if (!shot) { loading(`Reading ${shortTitle(acting)}`, '◉'); shot = await send('observe', { tabId: acting.id, activate: true }); if (workflow !== run) return; }
   const hash = textHash(shot.text);
