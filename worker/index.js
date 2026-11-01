@@ -184,7 +184,10 @@ function agentPrompt(input, page, todos, steps, contexts, elements, refs, correc
     'To type into a rich editor (Google Docs, Word Online, email composers) send one type action with the full text.',
     'If a cookie banner, modal or overlay blocks the target, dismiss it first.',
     'Only check a plan item off when a step in the history actually completed it. A failed, blocked or no-change step is not proof. Never fabricate completion.',
-    'Return done as soon as the goal is met, or if it is genuinely impossible.'
+    'The goal states intent, not a checklist of permitted words. Before deciding a step is not allowed because the goal did not name it, ask what the user actually wants and take the prerequisite steps that get there: dismiss banners, open menus, use the site’s own pages and search, filter, scroll, or follow links.',
+    'Never end the run because one step failed or was blocked: read the code, choose a different element or route, and continue toward the goal. Return done only when the goal is met, or when something outside the browser truly stops you (a password, CAPTCHA, payment credential or permission) — then say precisely what blocked you.',
+    'A step can come back with a notice instead of an error: it means the step was allowed but looks consequential. Treat notices as information and keep going.',
+    'If a plan item cannot be completed, do the rest of the task and list only that id in "unfinished" instead of abandoning everything.'
   ].join('\n');
   const progress = `ROUND ${steps.length + 1} · up to 40 actions` + (todos.length ? ` · plan ${todos.length - unchecked.length}/${todos.length} done` : '');
   const stalled = Number(input.stalled) > 1 ? `\nThe page has not changed for ${input.stalled} rounds. Something is wrong: try a different control, dismiss an overlay, scroll, read the page, or use key events instead of another identical click.` : '';

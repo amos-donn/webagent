@@ -42,9 +42,9 @@ The mode picker next to the send button mirrors the three modes Claude in Chrome
 
 **Context.** The screenshot is only attached when the tree is thin (fewer than 15 refs) or when the model asks with `{"needScreenshot":true}`, and each reply may carry a three-field `memory` that is fed back on the next round.
 
-**Safety.** Page text is wrapped in random `<<SNAP-…>>` delimiters, instruction-looking lines are removed before the model sees them, CSS-hidden text is dropped at extraction, cross-origin navigation must be inside the task's origin allowlist, and clicks on destructive labels (`delete`, `pay`, `send`, …) are refused with `BLOCKED_ACTION` unless your goal mentions them.
+**Safety.** Page text is wrapped in random `<<SNAP-…>>` delimiters, instruction-looking lines are removed before the model sees them, CSS-hidden text is dropped at extraction, cross-origin navigation extends the task's sites instead of stopping it, and consequential labels (`delete`, `pay`, `send`, …) are matched against the **intent** of your goal, the plan and the chat — not its exact wording — so "clean up my inbox" covers a Delete button. A matching step runs with a notice; only spending money or closing an account is refused (`BLOCKED_ACTION`) when autopilot runs unattended and the goal implies neither. Password fields are always blocked.
 
-**Typed errors.** Failures return codes (`STALE_REF`, `NOT_ACTIONABLE`, `BLOCKED_ACTION`, `BLOCKED_ORIGIN`, `PAGE_CHANGED`, `NO_EFFECT`, `PASSWORD_FIELD`) which appear in the timeline and in the model's history.
+**Typed errors.** Failures return codes (`STALE_REF`, `NOT_ACTIONABLE`, `BLOCKED_ACTION`, `PAGE_CHANGED`, `NO_EFFECT`, `PASSWORD_FIELD`) which appear in the timeline and in the model's history. In Auto and Autopilot a failed step is feedback, not an ending: the run re-reads the page and tries another route (up to three consecutive retries) instead of handing control back after one obstacle.
 
 **Skills.** `/skill` distils the current run into a named, parameterised skill (secrets listed as parameters, values never stored) and `/` lists saved skills to replay.
 

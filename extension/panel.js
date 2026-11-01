@@ -5,7 +5,7 @@ const CONTINUE = 'Continue to next step ↗';
 const STEP_LIMIT = 60;
 const MAX_CHATS = 20;
 const MAX_MESSAGES = 400;
-const RISK = /\b(buy|purchase|pay|checkout|order now|subscribe|delete|remove|archive|send|submit|post|publish|share|upload|transfer|confirm|book|reserve|invite|unsubscribe|sign out|log out)\b/i;
+const RISK = /\b(buy now|place order|pay now|purchase|checkout|transfer|withdraw|delete account|close account|cancel subscription)\b/i;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 let workflow = null, proposal = null, plan = [], chats = [], chat = null;
 let tabCache = [], actingTabId = null, contextIds = [];
@@ -297,6 +297,7 @@ async function next(run, prefetched) {
   if (!shot) { loading(`Reading ${shortTitle(acting)}`, '◉'); shot = await send('observe', { tabId: acting.id, activate: true }); if (workflow !== run) return; }
   const hash = textHash(shot.text);
   run.stalled = hash === run.lastHash ? (run.stalled || 0) + 1 : 0;
+  run.apiRetries = 0;
   run.lastHash = hash;
   const extra = (await Promise.all(contexts.map(t => send('context', { tabId: t.id }).then(c => c.text ? { url: c.url, title: c.title, text: c.text.slice(0, 4000) } : null).catch(() => null)))).filter(Boolean);
   const image = $('screenshot'); image.src = `data:image/jpeg;base64,${shot.image}`; await image.decode();
@@ -312,7 +313,7 @@ async function next(run, prefetched) {
   // Vision is a fallback: it is only attached for thin trees or when the model asks for it.
   const sendImage = run.wantShot || refs.length < 15;
   const started = performance.now();
-  const { actions, action, completed, incomplete, memory, needScreenshot, ms } = await api('/agent', { goal:run.goal, todos:plan, steps:run.steps, url:shot.url, title:shot.title, text:shot.text, ...(sendImage ? { image: shot.image } : {}), width:image.naturalWidth, height:image.naturalHeight, elements, refs, memory: run.memory || undefined, stalled:run.stalled, automatic:run.mode === 'autopilot', contexts:extra });
+  const { actions, action, completed, incomplete, memory, needScreenshot, ms } = await api('/agent', { goal:run.goal, intent:[run.goal, ...plan.map(item => item.title)].join('\n'), todos:plan, steps:run.steps, url:shot.url, title:shot.title, text:shot.text, ...(sendImage ? { image: shot.image } : {}), width:image.naturalWidth, height:image.naturalHeight, elements, refs, memory: run.memory || undefined, stalled:run.stalled, automatic:run.mode === 'autopilot', contexts:extra });
   if (memory) run.memory = memory;
   if (needScreenshot && !run.wantShot) { run.wantShot = true; return next(run); }
   run.wantShot = false;
@@ -326,6 +327,12 @@ async function next(run, prefetched) {
     pushMessage('agent', finish.summary || 'Workflow complete.');
     if (incomplete?.length) {
       const titles = plan.filter(item => incomplete.includes(item.id)).map(item => item.title);
+      if (run.mode !== 'manual' && (run.keepGoing || 0) < 2) {
+        run.keepGoing = (run.keepGoing || 0) + 1;
+        pushMessage('note', `${titles.length} plan step${titles.length === 1 ? '' : 's'} still open (${titles.join(' · ')}), so I’ll keep going instead of finishing.`);
+        $('loading').hidden = true;
+        return next(run);
+      }
       $('loading').hidden = true; $('approval').hidden = true; setStatus('');
       $('continue').hidden = false; $('stop').hidden = false; $('continue').textContent = 'Keep working on the plan ↗';
       notify(`Proposed finishing with ${titles.length} unchecked plan step${titles.length === 1 ? '' : 's'}: ${titles.join(' · ')}. Keep working, or Stop.`);
@@ -360,7 +367,18 @@ async function runBatch(run) {
   await safeNext(run);
 }
 async function safeNext(run) {
-  try { await next(run); } catch (e) { if (workflow === run) { $('loading').hidden = true; $('continue').hidden = false; setStatus(''); notify(e.message || 'Could not continue. Select Continue to retry.', true); } }
+  try { await next(run); }
+  catch (e) {
+    if (workflow !== run) return;
+    if (run.mode !== 'manual' && (run.apiRetries || 0) < 2) {
+      run.apiRetries = (run.apiRetries || 0) + 1;
+      pushMessage('note', `${e.message} Retrying with a fresh look at the page.`);
+      await sleep(900);
+      if (workflow === run) return safeNext(run);
+      return;
+    }
+    $('loading').hidden = true; $('continue').hidden = false; setStatus(''); notify(e.message || 'Could not continue. Select Continue to retry.', true);
+  }
 }
 async function executeOne(run, current) {
   if (!current || workflow !== run) return 'stop';
@@ -373,15 +391,13 @@ async function executeOne(run, current) {
     if (action.type === 'navigate') {
       const origin = new URL(action.url).origin;
       if (!run.allow.includes(origin)) {
-        const host = new URL(action.url).hostname;
-        if (!run.goal.toLowerCase().includes(host)) {
-          if (run.mode !== 'manual') throw Object.assign(new Error(`Blocked: ${host} is outside this task's allowed sites.`), { code: 'BLOCKED_ORIGIN' });
-          await permission(action.url);
-        }
+        // Following the goal to another site is progress, not a reason to stop.
         run.allow = [...run.allow, origin];
+        if (run.mode === 'manual') await permission(action.url).catch(() => {});
+        pushMessage('note', `Extended this task to ${new URL(action.url).hostname}.`);
       }
     }
-    result = await send('act', { ...current, goal: run.goal, allow: run.allow });
+    result = await send('act', { ...current, goal: run.goal, intent: [run.goal, ...plan.map(item => item.title)].join('\n'), allow: run.allow, automatic: run.mode === 'autopilot' });
   }
   catch (error) {
     if (workflow !== run) return 'stop';
@@ -389,13 +405,21 @@ async function executeOne(run, current) {
     run.steps.push({ type: action.type, description: action.description || '', ok: false, changed: false, code: error.code || 'ERROR', note: error.message, page: current.url });
     recordActivity(action, current.url, {}, 0, `${error.message}${error.code ? ` [${error.code}]` : ''}`);
     currentAction(null);
-    notify(`${error.message}${error.code ? ` (${error.code})` : ''} The agent will try a different approach when you continue.`, true);
+    const label = `${error.message}${error.code ? ` (${error.code})` : ''}`;
+    // A failed step is feedback for the model, not the end of the run.
+    if (run.mode !== 'manual' && (run.retries || 0) < 3) {
+      run.retries = (run.retries || 0) + 1;
+      notify(`${label}. Trying a different approach instead of stopping.`, true);
+      return 'recover';
+    }
+    notify(`${label} The agent will try a different approach when you continue.`, true);
     return 'failed';
   }
   if (workflow !== run) return 'stop';
+  if (result?.notice) pushMessage('note', result.notice);
   const verified = result?.effect?.verified;
   const changed = verified !== false;
-  if (changed) { run.evidence = (run.evidence || 0) + 1; run.stalled = 0; run.recovered = 0; run.lastHash = ''; }
+  if (changed) { run.evidence = (run.evidence || 0) + 1; run.stalled = 0; run.recovered = 0; run.retries = 0; run.lastHash = ''; run.apiRetries = 0; }
   else run.stalled = (run.stalled || 0) + 1;
   const note = action.type === 'read' && result?.text ? `page excerpt: ${String(result.text).slice(0, 1500)}` : '';
   run.steps.push({ type: action.type, description: action.description || '', ok: true, changed, page: current.url, note, code: result?.code || '', ref: action.ref, x: current.action.x, y: current.action.y, url: action.url, direction: action.direction, text: action.type === 'type' ? action.text : undefined });
@@ -410,7 +434,7 @@ async function startWorkflow(goal) {
   await permission(acting.url);
   if (!chat) { chat = newChatRecord(); chats.unshift(chat); }
   chat.goal = goal; chat.title = goal.slice(0, 60);
-  workflow = { goal, steps: [], mode, actingTabId: acting.id, contextIds: [...contextIds], stalled: 0, lastHash: '', queue: [], evidence: 0, unproven: 0, recovered: 0, allow: [new URL(acting.url).origin], memory: null, wantShot: false };
+  workflow = { goal, steps: [], mode, actingTabId: acting.id, contextIds: [...contextIds], stalled: 0, lastHash: '', queue: [], evidence: 0, unproven: 0, recovered: 0, retries: 0, apiRetries: 0, keepGoing: 0, allow: [new URL(acting.url).origin], memory: null, wantShot: false };
   const run = workflow;
   plan = [];
   pushMessage('user', goal);

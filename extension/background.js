@@ -2,8 +2,15 @@ chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
 const clip = (value, max) => String(value ?? '').slice(0, max);
 class AgentError extends Error { constructor(code, message) { super(message); this.code = code; } }
 const fail = (code, message) => { throw new AgentError(code, message); };
-// Labels that should never be triggered unless the user's own goal asks for them.
-const DESTRUCTIVE = /\b(delete|remove|refund|pay|purchase|buy now|checkout|place order|send|submit|transfer|withdraw|unsubscribe|deactivate|close account|archive)\b/i;
+// Consequential-looking labels, each with the words a user would use to ask for that outcome.
+// A goal is intent, not a list of allowed button words: "clean up my inbox" covers Delete.
+const INTENTS = [
+  { label: /\b(delete|remove|trash|discard|erase|purge|clear|dismiss|get rid of)\b/i, goal: /\b(delete|remove|trash|discard|erase|purge|clear|clean|empty|dismiss|get rid of|organi[sz]e|tidy)\b/i },
+  { label: /\b(pay|buy|purchase|checkout|place order|order now|add to cart|add to bag|donate|subscribe|upgrade)\b/i, goal: /\b(pay|buy|purchase|checkout|order|cart|bag|donate|subscribe|subscription|upgrade|plan|book|reserve|shop|price|cost|deal)\b/i },
+  { label: /\b(send|submit|post|publish|share|upload|invite|reply|comment|apply|register|sign up|log in|sign in)\b/i, goal: /\b(send|submit|post|publish|share|upload|invite|reply|comment|apply|register|sign ?up|log ?in|sign ?in|message|email|contact|fill|form|account|profile)\b/i },
+  { label: /\b(unsubscribe|deactivate|close account|delete account|cancel|sign out|log out|withdraw|transfer|refund|archive)\b/i, goal: /\b(unsubscribe|deactivate|close|cancel|delete|remove|sign ?out|log ?out|withdraw|transfer|refund|archive|account|subscription|membership)\b/i }
+];
+const MONEY = /\b(pay|buy|purchase|checkout|place order|transfer|withdraw|delete account|close account)\b/i;
 const AX_ROLES = new Set(['button', 'link', 'textbox', 'searchbox', 'combobox', 'checkbox', 'radio', 'switch', 'tab', 'menuitem', 'menuitemcheckbox', 'menuitemradio', 'option', 'slider', 'spinbutton', 'listbox']);
 const originOf = value => { try { return new URL(value).origin; } catch { return ''; } };
 function permitted(url) { try { const u = new URL(url); return u.protocol === 'https:' || (u.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(u.hostname)); } catch { return false; } }
@@ -314,28 +321,33 @@ async function clickType(tab, action, width, height) {
 }
 async function guardAction(tabId, action, message) {
   const allow = Array.isArray(message.allow) ? message.allow.filter(value => /^https?:\/\//.test(value)) : [];
-  if (action.type === 'navigate' && allow.length && !allow.includes(originOf(action.url))) fail('BLOCKED_ORIGIN', `Blocked: ${originOf(action.url)} is outside this task's allowed sites.`);
+  if (action.type === 'navigate' && allow.length && !allow.includes(originOf(action.url))) return { notice: `This task now includes ${originOf(action.url)}.` };
   if (!['click', 'type', 'fill'].includes(action.type)) return;
   const labels = [];
   if (action.ref) labels.push(await refLabel(tabId, action.ref));
   if (action.type === 'fill' && Array.isArray(action.fields)) for (const field of action.fields) if (field.ref) labels.push(await refLabel(tabId, field.ref));
-  const text = `${labels.join(' ')} ${action.submit ? 'submit' : ''}`;
-  const hit = text.match(DESTRUCTIVE);
-  if (!hit) return;
-  if (String(message.goal || '').toLowerCase().includes(hit[0].toLowerCase())) return;
-  fail('BLOCKED_ACTION', `Blocked “${hit[0]}” on “${clip(labels.join(' / ') || action.type, 60)}”: the goal does not ask for that step.`);
+  const text = `${labels.join(' ')} ${action.description || ''} ${action.text || ''} ${action.submit ? 'submit' : ''}`;
+  // Match the goal, the plan titles and the chat so far, by meaning rather than by exact wording.
+  const intent = `${message.goal || ''} ${message.intent || ''}`;
+  const groups = INTENTS.filter(group => group.label.test(text));
+  if (!groups.length) return;
+  const unmatched = groups.filter(group => !group.goal.test(intent));
+  if (!unmatched.length) return;
+  const words = unmatched.map(group => text.match(group.label)?.[0]).filter(Boolean);
+  if (message.automatic === true && unmatched.some(group => MONEY.test(text))) fail('BLOCKED_ACTION', `Blocked “${words[0]}”: spending money or closing an account is not something this goal implies. Do it explicitly, or finish the rest of the task and say what was skipped.`);
+  return { notice: `“${clip(labels.join(' / ') || words[0] || action.type, 50)}” can be hard to undo, but it matches what you asked for — going ahead.` };
 }
 async function actOnTab(fresh, action, message) {
   if (action.type === 'navigate') {
     const url = new URL(action.url);
     if (!permitted(url.href) || url.username || url.password) throw new Error('Only HTTPS or local URLs are allowed.');
-    await guardAction(fresh.id, action, message);
+    const gate = await guardAction(fresh.id, action, message);
     await chrome.tabs.update(fresh.id, { url: url.href });
-    return { effect: { verified: null } };
+    return { effect: { verified: null }, notice: gate?.notice };
   }
   if (action.type === 'read') { const page = await readPage(fresh.id); return { title: page.title, text: page.text, effect: { verified: true } }; }
   if (action.type === 'wait') { const seconds = Number(action.seconds); if (!Number.isFinite(seconds) || seconds < 1 || seconds > 10) throw new Error('Invalid wait duration.'); await sleep(Math.round(seconds * 1000)); return { effect: { verified: null } }; }
-  await guardAction(fresh.id, action, message);
+  const gate = await guardAction(fresh.id, action, message);
   if (action.type === 'fill') {
     const before = await signature(fresh.id);
     const results = [];
@@ -346,7 +358,7 @@ async function actOnTab(fresh, action, message) {
       await sleep(120);
     }
     const after = await settle(fresh.id, before);
-    return { fields: results, effect: { verified: before && after ? before !== after : null } };
+    return { fields: results, effect: { verified: before && after ? before !== after : null }, notice: gate?.notice };
   }
   const before = await signature(fresh.id);
   if (action.type === 'key') await debug(fresh.id, target => pressKey(target, action.key));
@@ -370,10 +382,10 @@ async function actOnTab(fresh, action, message) {
       after = await settle(fresh.id, before);
       verified = before && after ? before !== after : null;
     }
-    return { ...extra, fallback, effect: { verified }, code: verified === false ? 'NO_EFFECT' : undefined };
+    return { ...extra, fallback, effect: { verified }, code: verified === false ? 'NO_EFFECT' : undefined, notice: gate?.notice };
   } else throw new Error('Unknown action.');
   const after = await settle(fresh.id, before);
-  return { effect: { verified: before && after ? before !== after : null }, code: before && after && before === after ? 'NO_EFFECT' : undefined };
+  return { effect: { verified: before && after ? before !== after : null }, code: before && after && before === after ? 'NO_EFFECT' : undefined, notice: gate?.notice };
 }
 let bridgeSocket = null;
 // The service worker dials a loopback bridge when the user enables it, so other agents can drive the tab.

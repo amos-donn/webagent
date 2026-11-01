@@ -263,6 +263,17 @@ test('memory is returned by one round and fed into the next', async () => {
   } finally { second.restore(); }
 });
 
+test('the prompt judges intent and refuses to quit over one blocked step', async () => {
+  const mock = scripted([{ actions:[{ type:'click', x:1, y:2, description:'Open the menu' }] }]);
+  try {
+    await worker.fetch(request(observation), { DB:db, OPENROUTER_API_KEY:'test-key' });
+    const prompt = mock.calls[0].messages[0].content[0].text;
+    assert.match(prompt, /goal states intent, not a checklist of permitted words/);
+    assert.match(prompt, /Never end the run because one step failed or was blocked/);
+    assert.match(prompt, /notice instead of an error/);
+  } finally { mock.restore(); }
+});
+
 test('a text-only round can ask for the screenshot, and no image is sent by default', async () => {
   const ask = scripted([{ needScreenshot: true }]);
   try {
