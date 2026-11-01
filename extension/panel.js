@@ -682,12 +682,14 @@ $('reject').addEventListener('click', () => { stop(); notify('Stopped without ta
 $('stop').addEventListener('click', () => { stop(); notify('Workflow stopped. An action already in progress may still finish.'); });
 $('worker').addEventListener('change', async () => { await chrome.storage.local.set({ worker: $('worker').value.trim().replace(/\/$/, '') }); });
 $('bridge-toggle').addEventListener('change', async () => { try { const out = await send('bridge', { on: $('bridge-toggle').checked }); notify(out.connected ? 'Bridge on. Start node bridge/server.mjs to accept MCP clients.' : 'Bridge off.'); } catch (e) { notify(e.message || 'Could not toggle the bridge.', true); } });
+$('pointer-toggle').addEventListener('change', async () => { await chrome.storage.local.set({ pointer: $('pointer-toggle').checked }); notify($('pointer-toggle').checked ? 'Pointer on: a purple cursor shows where the agent clicks.' : 'Pointer off.'); });
 
 (async () => {
-  const saved = await chrome.storage.local.get(['worker', 'chats', 'activeChat', 'mode', 'planMode', 'lastShot', 'skills', 'bridge']);
+  const saved = await chrome.storage.local.get(['worker', 'chats', 'activeChat', 'mode', 'planMode', 'lastShot', 'skills', 'bridge', 'pointer']);
   $('worker').value = saved.worker || 'https://webagent.amos-donn.workers.dev';
   skills = Array.isArray(saved.skills) ? saved.skills : [];
   $('bridge-toggle').checked = saved.bridge === true;
+  $('pointer-toggle').checked = saved.pointer !== false;
   mode = ['manual', 'auto', 'autopilot'].includes(saved.mode) ? saved.mode : 'autopilot';
   planMode = ['auto', 'always', 'never'].includes(saved.planMode) ? saved.planMode : 'auto';
   $('mode').value = mode;

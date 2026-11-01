@@ -133,12 +133,19 @@ async function readPage(tabId) {
   return result;
 }
 async function shoot(tabId) {
-  return debug(tabId, async target => {
-    const metrics = await chrome.debugger.sendCommand(target, 'Page.getLayoutMetrics');
-    const viewport = metrics.cssVisualViewport || metrics.visualViewport;
-    const image = await chrome.debugger.sendCommand(target, 'Page.captureScreenshot', { format: 'jpeg', quality: 65, fromSurface: true });
-    return { image: image.data, width: viewport.clientWidth, height: viewport.clientHeight };
-  });
+  // The agent must never see its own cursor in a decision screenshot.
+  await chrome.scripting.executeScript({ target: { tabId }, func: pointerVisibility, args: [true] }).catch(() => {});
+  await sleep(50);
+  try {
+    return await debug(tabId, async target => {
+      const metrics = await chrome.debugger.sendCommand(target, 'Page.getLayoutMetrics');
+      const viewport = metrics.cssVisualViewport || metrics.visualViewport;
+      const image = await chrome.debugger.sendCommand(target, 'Page.captureScreenshot', { format: 'jpeg', quality: 65, fromSurface: true });
+      return { image: image.data, width: viewport.clientWidth, height: viewport.clientHeight };
+    });
+  } finally {
+    await chrome.scripting.executeScript({ target: { tabId }, func: pointerVisibility, args: [false] }).catch(() => {});
+  }
 }
 // Accessibility tree: the primary grounding channel. Refs are stable handles for semantic nodes.
 async function axSnapshot(tabId) {
@@ -219,7 +226,9 @@ function pageSignature() {
   let hash = 0;
   for (let i = 0; i < text.length; i += 7) hash = (hash * 31 + text.charCodeAt(i)) | 0;
   const active = document.activeElement;
-  return `${location.href}|${text.length}|${hash}|${document.querySelectorAll('*').length}|${Math.round(scrollY)}|${active ? active.tagName : ''}`;
+  // The agent's own overlays (cursor, write box) are not page content: counting them would make a
+  // click look like it changed the page when only the overlay moved.
+  return `${location.href}|${text.length}|${hash}|${document.querySelectorAll('*:not([id^="webagent-"])').length}|${Math.round(scrollY)}|${active ? active.tagName : ''}`;
 }
 async function signature(tabId) {
   try { const [{ result }] = await chrome.scripting.executeScript({ target: { tabId }, func: pageSignature }); return typeof result === 'string' ? result : ''; } catch { return ''; }
@@ -341,6 +350,95 @@ async function typeKeys(target, text) {
     await chrome.debugger.sendCommand(target, 'Input.dispatchKeyEvent', { type: 'keyUp', key: char, windowsVirtualKeyCode: virtual });
   }
 }
+// A person watching the tab cannot tell where the agent is clicking: CDP input moves no real
+// pointer. So the cursor is drawn — a purple arrow that slides to the target and ripples where the
+// click lands. Presentation only; every call degrades silently and none of it changes the input.
+function pointerMove(x, y) {
+  const id = 'webagent-pointer';
+  let host = document.getElementById(id);
+  if (!host) {
+    host = document.createElement('div');
+    host.id = id;
+    host.style.cssText = 'position:fixed;left:0;top:0;width:0;height:0;overflow:visible;pointer-events:none;z-index:2147483647';
+    const root = host.attachShadow({ mode: 'open' });
+    const style = document.createElement('style');
+    style.textContent = '.wrap{position:fixed;left:0;top:0;width:0;height:0;will-change:transform}'
+      + '.arrow{position:absolute;left:-4.2px;top:-2.5px;width:20px;height:20px;transform-origin:4.2px 2.5px;filter:drop-shadow(0 2px 5px rgba(76,29,149,.4));opacity:0}'
+      + '.ring{position:absolute;left:-32px;top:-32px;width:64px;height:64px;border-radius:50%;border:2px solid rgba(168,85,247,.85);background:radial-gradient(circle,rgba(168,85,247,.3),rgba(168,85,247,0) 70%);opacity:0}';
+    const svg = 'http://www.w3.org/2000/svg';
+    const wrap = document.createElement('div'); wrap.className = 'wrap';
+    const ring = document.createElement('span'); ring.className = 'ring';
+    const arrow = document.createElementNS(svg, 'svg');
+    arrow.setAttribute('class', 'arrow'); arrow.setAttribute('viewBox', '0 0 24 24'); arrow.setAttribute('aria-hidden', 'true');
+    const shape = document.createElementNS(svg, 'path');
+    shape.setAttribute('d', 'M5 3 5 19.6 9.4 15.4 12.3 21.6 15.2 20.2 12.3 14.1 18.8 13.6 Z');
+    shape.setAttribute('fill', '#a855f7'); shape.setAttribute('stroke', '#fff');
+    shape.setAttribute('stroke-width', '1.4'); shape.setAttribute('stroke-linejoin', 'round');
+    arrow.append(shape);
+    wrap.append(ring, arrow);
+    root.append(style, wrap);
+    document.documentElement.appendChild(host);
+  }
+  const root = host.shadowRoot, wrap = root.querySelector('.wrap'), arrow = root.querySelector('.arrow');
+  const still = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const from = host.dataset.x ? { x: Number(host.dataset.x), y: Number(host.dataset.y) } : null;
+  host.dataset.x = String(Math.round(x));
+  host.dataset.y = String(Math.round(y));
+  const to = `translate3d(${Math.round(x)}px,${Math.round(y)}px,0)`;
+  if (!from) {
+    // First appearance: no journey to animate, so fade in where the click will land.
+    wrap.style.transform = to;
+    arrow.style.opacity = '1';
+    if (!still) arrow.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 180, easing: 'ease-out' });
+    return 0;
+  }
+  const ms = still ? 0 : Math.min(360, Math.max(140, Math.round(Math.hypot(x - from.x, y - from.y) * 0.9)));
+  arrow.style.opacity = '1';
+  wrap.animate(
+    [{ transform: `translate3d(${from.x}px,${from.y}px,0)` }, { transform: to }],
+    { duration: ms, easing: 'cubic-bezier(.22,.61,.36,1)', fill: 'forwards' }
+  ).finished.catch(() => {});
+  return ms;
+}
+function pointerPress() {
+  const host = document.getElementById('webagent-pointer');
+  const root = host && host.shadowRoot;
+  if (!root) return false;
+  const ring = root.querySelector('.ring'), arrow = root.querySelector('.arrow');
+  if (!ring || !arrow) return false;
+  if (matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    ring.animate([{ opacity: .85 }, { opacity: 0 }], { duration: 200 });
+    return true;
+  }
+  ring.animate(
+    [{ transform: 'scale(.2)', opacity: .9 }, { transform: 'scale(1)', opacity: 0 }],
+    { duration: 420, easing: 'cubic-bezier(.16,.8,.32,1)' }
+  );
+  arrow.animate(
+    [{ transform: 'scale(1)' }, { transform: 'scale(.86)' }, { transform: 'scale(1)' }],
+    { duration: 190, easing: 'ease-out' }
+  );
+  return true;
+}
+function pointerVisibility(hidden) {
+  const host = document.getElementById('webagent-pointer');
+  if (!host) return false;
+  host.style.visibility = hidden ? 'hidden' : 'visible';
+  return true;
+}
+async function pointerEnabled() {
+  const saved = await chrome.storage.local.get('pointer').catch(() => ({}));
+  return saved.pointer !== false;
+}
+async function pointerTo(tabId, point) {
+  try {
+    const [{ result: ms }] = await chrome.scripting.executeScript({ target: { tabId }, func: pointerMove, args: [point.x, point.y] });
+    if (Number.isFinite(ms) && ms > 0) await sleep(Math.min(ms, 400));
+  } catch { /* a page that blocks injection simply gets no cursor */ }
+}
+function pointerClick(tabId) {
+  chrome.scripting.executeScript({ target: { tabId }, func: pointerPress }).catch(() => {});
+}
 async function clickPoint(target, point) {
   await chrome.debugger.sendCommand(target, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x: point.x, y: point.y, button: 'none' });
   await chrome.debugger.sendCommand(target, 'Input.dispatchMouseEvent', { type: 'mousePressed', x: point.x, y: point.y, button: 'left', clickCount: 1 });
@@ -366,7 +464,9 @@ async function clickType(tab, action, width, height) {
   return debug(tab.id, async target => {
     const live = await liveViewport(target);
     const point = scalePoint(action, width, height, live);
+    if (await pointerEnabled()) await pointerTo(tab.id, point);
     await clickPoint(target, point);
+    pointerClick(tab.id);
     await sleep(120);
     if (action.type !== 'type') return {};
     const focused = await readEditable(tab.id);
@@ -406,11 +506,13 @@ async function writeInto(fresh, action, message) {
   }
   const label = (action.ref ? await refLabel(fresh.id, action.ref) : '') || 'the field';
   const page = await readPage(fresh.id).catch(() => ({ text: '' }));
+  if (await pointerEnabled()) await pointerTo(fresh.id, point);
   await chrome.scripting.executeScript({ target: { tabId: fresh.id }, func: writeBoxShow, args: [point.x, point.y] }).catch(() => {});
   let produced = 0, failure = '';
   try {
     const outcome = await debug(fresh.id, async target => {
       await clickPoint(target, point);
+      pointerClick(fresh.id);
       await sleep(160);
       const focused = await readEditable(fresh.id);
       if (focused.password) fail('PASSWORD_FIELD', 'Password and login fields are blocked.');
