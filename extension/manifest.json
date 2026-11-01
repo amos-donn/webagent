@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Webagent — Browser Agent",
-  "version": "1.1.2",
+  "version": "1.1.3",
   "description": "A side-panel agent for multi-step browser workflows.",
   "minimum_chrome_version": "116",
   "permissions": ["sidePanel", "storage", "unlimitedStorage", "tabs", "tabGroups", "scripting", "debugger"],
