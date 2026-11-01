@@ -694,22 +694,24 @@ async function handle(message) {
     return { on: message.on === true, connected: !!bridgeSocket };
   }
   if (message.type === 'tabs') {
-    const tabs = await chrome.tabs.query({ currentWindow: true });
-    return { tabs: tabs.filter(t => t.id && t.url).map(t => ({ id: t.id, title: t.title || t.url, url: t.url, active: !!t.active, audible: !!t.audible, supported: permitted(t.url) })) };
-  }
-  if (message.type === 'group') {
-    try {
-      const existing = await chrome.tabs.get(message.tabId);
-      if (existing.groupId > 0) return { groupId: existing.groupId };
-      const groupId = await chrome.tabs.group({ tabIds: [message.tabId] });
-      await chrome.tabGroups.update(groupId, { title: 'webagent', color: 'blue' }).catch(() => {});
-      return { groupId };
-    } catch { return {}; }
+    // Every window, not just this one: the page you reference with @ is often in another window.
+    const tabs = await chrome.tabs.query({});
+    const [current] = await chrome.tabs.query({ active: true, lastFocusedWindow: true }).catch(() => []);
+    const here = current?.windowId;
+    const ordered = [...tabs].sort((a, b) => Number(b.windowId === here) - Number(a.windowId === here));
+    return { tabs: ordered.filter(t => t.id && t.url).map(t => ({ id: t.id, title: t.title || t.url, url: t.url, active: !!t.active && t.windowId === here, windowId: t.windowId, audible: !!t.audible, supported: permitted(t.url) })) };
   }
   if (message.type === 'context') {
     const tab = await getTab(message.tabId);
     if (!permitted(tab.url)) throw new Error('That page is not supported. Chrome internal pages are not supported.');
-    const page = await readPage(tab.id);
+    let page;
+    try { page = await readPage(tab.id); }
+    catch {
+      // A sleeping or long-backgrounded tab can refuse injection; waking it once usually fixes that.
+      await chrome.tabs.update(tab.id, { active: true }).catch(() => {});
+      await sleep(400);
+      page = await readPage(tab.id);
+    }
     return { tabId: tab.id, url: tab.url, title: page.title, text: page.text };
   }
   if (message.type === 'observe') {

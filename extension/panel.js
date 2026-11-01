@@ -1,6 +1,6 @@
 const $ = id => document.getElementById(id);
-const ICONS = { think:'sparkle', click:'cursor-click', type:'keyboard', write:'sparkle', read:'book-open-text', scroll:'arrows-down-up', wait:'hourglass', navigate:'arrow-right', key:'key-return' };
-const LABELS = { think:'Thinking through', click:'Clicking', type:'Typing', write:'Writing with Gemini', read:'Reading page', scroll:'Scrolling', wait:'Waiting', navigate:'Navigating', key:'Pressing key' };
+const ICONS = { think:'sparkle', click:'cursor-click', type:'keyboard', write:'sparkle', read:'book-open-text', scroll:'arrows-down-up', wait:'hourglass', navigate:'arrow-right', key:'key-return', switch:'arrow-right' };
+const LABELS = { think:'Thinking through', click:'Clicking', type:'Typing', write:'Writing with Gemini', read:'Reading page', scroll:'Scrolling', wait:'Waiting', navigate:'Navigating', key:'Pressing key', switch:'Switching tabs' };
 const STEP_LIMIT = 60;
 const MAX_CHATS = 20;
 const MAX_MESSAGES = 400;
@@ -375,7 +375,8 @@ async function next(run, prefetched) {
   if (!acting) throw new Error('No open tab found. Open a webpage first.');
   if (!acting.supported) throw new Error('The acting tab is not supported. Pick an HTTPS page — Chrome internal pages are blocked.');
   run.actingTabId = acting.id;
-  const contexts = tabCache.filter(t => run.contextIds.includes(t.id) && t.id !== acting.id && t.supported).slice(0, 5);
+  // Context tabs keep the order the user attached them in, so the numbering the model gets last round still means the same tab.
+  const contexts = run.contextIds.map(id => tabCache.find(t => t.id === id)).filter(t => t && t.id !== acting.id && t.supported).slice(0, 5);
   try { await permission(); }
   catch (e) { if (workflow !== run) return; halt(run, e.message); return; }
   let shot = prefetched;
@@ -384,7 +385,16 @@ async function next(run, prefetched) {
   run.stalled = hash === run.lastHash ? (run.stalled || 0) + 1 : 0;
   run.apiRetries = 0;
   run.lastHash = hash;
-  const extra = (await Promise.all(contexts.map(t => send('context', { tabId: t.id }).then(c => c.text ? { url: c.url, title: c.title, text: c.text.slice(0, 4000) } : null).catch(() => null)))).filter(Boolean);
+  const read = await Promise.all(contexts.map(t => send('context', { tabId: t.id }).then(c => c.text ? { id: t.id, url: c.url, title: c.title, text: c.text.slice(0, 12000) } : null).catch(() => null)));
+  const extra = read.filter(Boolean).map(c => ({ url: c.url, title: c.title, text: c.text }));
+  // A switch action names a tab by its position in this list, so the mapping must match the payload exactly.
+  run.contextTabs = read.filter(Boolean).map(c => c.id);
+  run.warned = run.warned || [];
+  for (const [index, tab] of contexts.entries()) {
+    if (read[index] || run.warned.includes(tab.id)) continue;
+    run.warned.push(tab.id);
+    pushMessage('note', `Could not read ${shortTitle(tab)} as context — it may have been closed or asleep.`);
+  }
   const image = $('screenshot'); image.src = `data:image/jpeg;base64,${shot.image}`; await image.decode();
   lastShot = `data:image/jpeg;base64,${shot.image}`;
   $('saw-image').src = lastShot; $('saw-btn').hidden = false;
@@ -477,6 +487,26 @@ async function executeOne(run, current) {
   currentAction(`Doing ${action.type.toUpperCase()}: ${action.description || ''}`);
   proposal = null;
   let result;
+  // Multi-tab: the model asks for a numbered context tab and the run continues there next round.
+  if (action.type === 'switch') {
+    const target = (run.contextTabs || [])[action.tab - 1];
+    const tab = tabCache.find(t => t.id === target);
+    if (!tab) {
+      currentAction(null);
+      notify('That tab is no longer open, so I will keep working in this one.', true);
+      return 'recover';
+    }
+    const previous = run.actingTabId;
+    run.actingTabId = tab.id;
+    run.contextIds = [...new Set([...run.contextIds, previous])].filter(id => id !== tab.id).slice(0, 5);
+    try { run.allow = [...new Set([...run.allow, new URL(tab.url).origin])]; } catch { /* an unparseable tab URL keeps the old allow list */ }
+    run.steps.push({ type: 'switch', description: `Switched to ${shortTitle(tab)}`, ok: true, changed: true, page: tab.url });
+    recordActivity({ type: 'switch', description: `Switched to ${shortTitle(tab)}` }, tab.url, {}, 0, null, { changed: true });
+    pushMessage('note', `Now working in ${shortTitle(tab)}.`);
+    currentAction(null);
+    await sleep(250);
+    return 'recover';
+  }
   try {
     if (action.type === 'navigate') {
       const origin = new URL(action.url).origin;
@@ -527,7 +557,7 @@ async function startWorkflow(goal, skill) {
   // A clicked or named skill wins; otherwise a Google page plus summarising words picks it up by itself.
   const chosen = skill || builtinFor(acting.url, goal);
   chat.goal = goal; chat.title = goal.slice(0, 60);
-  workflow = { goal, skill: chosen || null, steps: [], mode, actingTabId: acting.id, contextIds: [...contextIds], stalled: 0, lastHash: '', queue: [], evidence: 0, unproven: 0, recovered: 0, retries: 0, apiRetries: 0, keepGoing: 0, allow: [new URL(acting.url).origin], memory: null, wantShot: false };
+  workflow = { goal, skill: chosen || null, steps: [], mode, actingTabId: acting.id, contextIds: [...contextIds], stalled: 0, lastHash: '', queue: [], evidence: 0, unproven: 0, recovered: 0, retries: 0, apiRetries: 0, keepGoing: 0, allow: [new URL(acting.url).origin],    memory: null, wantShot: false, contextTabs: [], warned: [] };
   const run = workflow;
   plan = [];
   pushMessage('user', goal);
@@ -537,7 +567,6 @@ async function startWorkflow(goal, skill) {
   $('suggest').hidden = true;
   $('start').hidden = true; $('stop').hidden = false; $('goal').disabled = true; $('mode').disabled = true;
   loading('Reading the page', 'eye');
-  send('group', { tabId: acting.id }).catch(() => {});
   try {
     const observed = send('observe', { tabId: acting.id, activate: true });
     if (planMode === 'never') {
@@ -630,7 +659,7 @@ function renderSuggest() {
     ...skills.filter(skill => ('/' + skill.name).toLowerCase().replace(/[^a-z0-9/]+/g, '-').startsWith('/' + slash[1].toLowerCase())).map(skill => ({ label: '/' + skill.name, hint: skill.description || 'Run a saved skill', apply: () => { $('goal').value = skill.prompt || (skill.steps || []).join(' → '); hideSuggest(); notify('Skill loaded — send the message to run it.'); } })),
     ...BUILTIN_SKILLS.filter(skill => ('/' + skill.name).toLowerCase().replace(/[^a-z0-9/]+/g, '-').startsWith('/' + slash[1].toLowerCase())).map(skill => ({ label: '/' + skill.name, hint: skill.description, apply: () => { $('goal').value = skill.defaultGoal; grow(); hideSuggest(); notify(`Skill loaded — send it to run “${skill.name}”.`); } }))
   ];
-  else if (at) items = tabCache.filter(tab => tab.supported && tab.id !== actingTabId && shortTitle(tab).toLowerCase().includes(at[1].toLowerCase())).slice(0, 6).map(tab => ({ label: `@${shortTitle(tab)}`, hint: 'Add as read-only context', apply: () => { contextIds = [...new Set([...contextIds, tab.id])].slice(0, 5); renderTabs(); $('goal').value = value.replace(/(?:^|\s)@([^\s@]*)$/i, '').trim(); notify(`Added ${shortTitle(tab)} as context.`); hideSuggest(); } }));
+  else if (at) items = tabCache.filter(tab => tab.supported && tab.id !== actingTabId && `${shortTitle(tab)} ${tab.url} ${hostOf(tab.url)}`.toLowerCase().includes(at[1].toLowerCase())).slice(0, 6).map(tab => ({ label: `@${shortTitle(tab)}`, hint: `Add ${hostOf(tab.url)} as context`, apply: () => { contextIds = [...new Set([...contextIds, tab.id])].slice(0, 5); renderTabs(); $('goal').value = value.replace(/(?:^|\s)@([^\s@]*)$/i, '').trim(); notify(`Added ${shortTitle(tab)} as context.`); hideSuggest(); } }));
   box.textContent = '';
   if (!items.length) { hideSuggest(); return; }
   for (const item of items) {

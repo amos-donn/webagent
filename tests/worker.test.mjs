@@ -180,6 +180,33 @@ test('a reply with several actions is returned as one batch', async () => {
   } finally { mock.restore(); }
 });
 
+test('switch moves the run to a numbered context tab', async () => {
+  const contexts = [{ url:'https://news.example/', title:'News', text:'Headlines' }];
+  const mock = scripted([{ actions:[{ type:'switch', tab:2, description:'Work in the news tab' }] }]);
+  try {
+    const response = await worker.fetch(request({ ...observation, contexts }), { DB:db, GEMINI_API_KEY:'test-key' });
+    assert.equal(response.status, 200);
+    const out = await response.json();
+    assert.equal(out.action.type, 'switch');
+    assert.equal(out.action.tab, 2);
+    const prompt = said(mock.calls[0]);
+    assert.match(prompt, /\[tab 1\] News/);
+    assert.match(prompt, /"type":"switch","tab":N/);
+  } finally { mock.restore(); }
+  const bad = scripted([{ actions:[{ type:'switch', tab:0, description:'Nope' }] }, { type:'scroll', direction:'down', description:'Reveal more' }]);
+  try {
+    await worker.fetch(request({ ...observation, contexts }), { DB:db, GEMINI_API_KEY:'test-key' });
+    assert.equal(bad.calls.length, 2, 'an impossible tab number is corrected, not accepted');
+    assert.match(said(bad.calls[1]), /A switch action needs/);
+  } finally { bad.restore(); }
+  const batched = scripted([{ actions:[click(), { type:'switch', tab:1, description:'Go' }] }]);
+  try {
+    const response = await worker.fetch(request({ ...observation, contexts }), { DB:db, GEMINI_API_KEY:'test-key' });
+    assert.equal(response.status, 400);
+    assert.match((await response.json()).error, /cannot be batched/);
+  } finally { batched.restore(); }
+});
+
 test('done cannot be batched and the reply is corrected', async () => {
   const mock = scripted([{ actions:[click(), { type:'done', summary:'Done.' }] }, { type:'scroll', direction:'down', description:'Reveal more' }]);
   try {
