@@ -32,11 +32,11 @@ test('plan endpoint returns a numbered checklist without sending an image', asyn
   } finally { mock.restore(); }
 });
 
-test('the model is configurable with GEMINI_MODEL and defaults to 3.5 Flash-Lite', async () => {
+test('the model is configurable with GEMINI_MODEL and defaults to 3.8 Flash', async () => {
   const defaults = scripted([{ steps:['One step'] }]);
   try {
     await worker.fetch(request({ goal:'Check prices', url:'https://example.com/' }, '/plan'), { DB:db, GEMINI_API_KEY:'test-key' });
-    assert.match(defaults.urls[0], /\/models\/gemini-3\.5-flash-lite:generateContent$/);
+    assert.match(defaults.urls[0], /\/models\/gemini-3\.8-flash:generateContent$/);
   } finally { defaults.restore(); }
   const mock = scripted([{ steps:['One step'] }]);
   try {
@@ -48,7 +48,7 @@ test('the model is configurable with GEMINI_MODEL and defaults to 3.5 Flash-Lite
 test('prompt carries the plan, condensed older steps, element hints and todo filtering', async () => {
   const mock = scripted([{ type:'click', x:5, y:5, description:'Open menu', completed:['2','99'] }]);
   const steps = [
-    ...Array.from({ length: 10 }, (_, i) => ({ type:'click', description:`old step ${i}`, ok:true })),
+    ...Array.from({ length: 18 }, (_, i) => ({ type:'click', description:`old step ${i}`, ok:true })),
     { type:'type', description:'typed a query', ok:false, note:'not a text field', page:'https://example.com/' }
   ];
   try {
@@ -97,7 +97,7 @@ test('a repeated click is corrected once and the second choice is returned', asy
     assert.equal(out.action.type, 'scroll');
     assert.equal(out.retried, true);
     assert.equal(mock.calls.length, 2);
-    assert.match(said(mock.calls[1]), /CORRECTION: click .* already tried 2 times/);
+    assert.match(said(mock.calls[1]), /CORRECTION: click .* already ran at step 1 and it worked/);
   } finally { mock.restore(); }
 });
 
@@ -485,5 +485,36 @@ test('a correction from the final check is carried into the next round', async (
   try {
     await worker.fetch(request({ ...observation, correction:'The title is still empty: type it into the document.' }), { DB:db, GEMINI_API_KEY:'test-key' });
     assert.match(said(mock.calls[0]), /CORRECTION: The title is still empty: type it into the document\./);
+  } finally { mock.restore(); }
+});
+
+test('a control that already worked is not clicked again, and the prompt shows what is done', async () => {
+  const mock = scripted([{ actions:[{ type:'click', ref:'e12', description:'Open the menu' }] }, { type:'scroll', direction:'down', description:'Reveal the hours' }]);
+  const steps = [{ type:'click', ref:'e12', description:'Opened the menu', ok:true, changed:true, page:'https://example.com/menu' }];
+  try {
+    const response = await worker.fetch(request({ ...observation, refs:[{ ref:'e12', role:'button', name:'Menu' }], steps }), { DB:db, GEMINI_API_KEY:'test-key' });
+    const out = await response.json();
+    assert.equal(out.action.type, 'scroll');
+    assert.equal(mock.calls.length, 2);
+    assert.match(said(mock.calls[1]), /already ran at step 1 and it worked/);
+    const prompt = said(mock.calls[0]);
+    assert.match(prompt, /PROVEN DONE THIS RUN/);
+    assert.match(prompt, /click on ref=e12: Opened the menu/);
+    assert.match(prompt, /1\. click on ref=e12: Opened the menu/);
+    assert.match(prompt, /Do not do them again/);
+  } finally { mock.restore(); }
+});
+
+test('a click that keeps failing is corrected with the count, not silently repeated', async () => {
+  const mock = scripted([click(), { type:'scroll', direction:'down', description:'Reveal more menu items' }]);
+  const steps = [
+    { type:'click', x:10, y:20, description:'Open menu', ok:false, changed:false, note:'no visible change' },
+    { type:'click', x:11, y:21, description:'Open menu again', ok:false, changed:false }
+  ];
+  try {
+    const out = await (await worker.fetch(request({ ...observation, steps }), { DB:db, GEMINI_API_KEY:'test-key' })).json();
+    assert.equal(out.action.type, 'scroll');
+    assert.match(said(mock.calls[1]), /already tried 2 times and the page did not change/);
+    assert.doesNotMatch(said(mock.calls[0]), /PROVEN DONE THIS RUN/);
   } finally { mock.restore(); }
 });

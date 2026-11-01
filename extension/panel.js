@@ -11,7 +11,6 @@ let tabCache = [], actingTabId = null, contextIds = [];
 let mode = 'autopilot', planMode = 'auto', lastShot = '', skills = [];
 
 function notify(text, error = false) { $('notice').textContent = text; $('notice').classList.toggle('error', error); $('notice').hidden = false; }
-function setStatus(text) { $('status').textContent = text || ''; $('status').hidden = !text; }
 function baseUrl() { const url = new URL($('worker').value.trim()); if (url.username || url.password || url.search || url.hash || (url.protocol !== 'https:' && !(url.protocol === 'http:' && ['localhost','127.0.0.1'].includes(url.hostname)))) throw new Error('Use an HTTPS Worker URL or localhost.'); return url.origin + url.pathname.replace(/\/$/, ''); }
 // Ask once for every site, not once per site: Chrome remembers this grant until you revoke it.
 const ALL_SITES = ['https://*/*', 'http://*/*'];
@@ -301,14 +300,13 @@ function stop() {
   workflow = null; proposal = null; currentAction(null);
   $('approval').hidden = true; $('stop').hidden = true; $('start').hidden = false;
   $('goal').disabled = false; $('mode').disabled = false; $('loading').hidden = true;
-  setStatus('');
   renderPlan(); renderSkillChip(); persist().catch(() => {});
 }
 function loading(label, icon = 'spinner-gap') {
   $('loading-label').textContent = label;
   setIcon($('loading-icon'), icon, 17);
   $('loading-icon').classList.toggle('spin', icon === 'spinner-gap' || icon === 'circle-notch');
-  $('loading').hidden = false; setStatus(label);
+  $('loading').hidden = false;
 }
 function currentAction(label) {
   const existing = $('current-action');
@@ -437,7 +435,7 @@ async function next(run, prefetched) {
     if (risky) pushMessage('note', `Auto mode paused this step because ${risky}.`);
     await runBatch(run);
   } else {
-    $('approval').hidden = false; $('loading').hidden = true; setStatus('Waiting for you');
+    $('approval').hidden = false; $('loading').hidden = true;
     notify(risky ? `Paused before this round because ${risky}. Approve to continue.` : 'Review the queued actions before they run.');
   }
 }
@@ -522,7 +520,7 @@ async function executeOne(run, current) {
   catch (error) {
     if (workflow !== run) return 'stop';
     if (error.code === 'PAGE_CHANGED' && (run.recovered || 0) < 2) { run.recovered = (run.recovered || 0) + 1; notify('The page shifted while acting. Re-reading it and trying again.'); return 'recover'; }
-    run.steps.push({ type: action.type, description: action.description || '', ok: false, changed: false, code: error.code || 'ERROR', note: error.message, page: current.url });
+    run.steps.push({ type: action.type, description: action.description || '', ok: false, changed: false, code: error.code || 'ERROR', note: error.message, page: current.url, ref: action.ref, x: current.action.x, y: current.action.y, url: action.url, direction: action.direction, text: action.type === 'type' ? action.text : undefined });
     recordActivity(action, current.url, {}, 0, `${error.message}${error.code ? ` [${error.code}]` : ''}`);
     currentAction(null);
     const label = `${error.message}${error.code ? ` (${error.code})` : ''}`;
@@ -587,7 +585,7 @@ async function startWorkflow(goal, skill) {
     await next(run, shot.value);
   } catch (e) {
     if (workflow !== run) return;
-    $('loading').hidden = true; setStatus('');
+    $('loading').hidden = true;
     throw e;
   }
 }
