@@ -1,7 +1,6 @@
 const $ = id => document.getElementById(id);
-const ICONS = { think:'💭', click:'⌖', type:'⌨', read:'📖', scroll:'↕', wait:'⏳', navigate:'↗', key:'⏎' };
+const ICONS = { think:'sparkle', click:'cursor-click', type:'keyboard', read:'book-open-text', scroll:'arrows-down-up', wait:'hourglass', navigate:'arrow-right', key:'key-return' };
 const LABELS = { think:'Thinking through', click:'Clicking', type:'Typing', read:'Reading page', scroll:'Scrolling', wait:'Waiting', navigate:'Navigating', key:'Pressing key' };
-const CONTINUE = 'Continue to next step ↗';
 const STEP_LIMIT = 60;
 const MAX_CHATS = 20;
 const MAX_MESSAGES = 400;
@@ -46,6 +45,10 @@ async function api(path, data, retries = 2) {
 }
 function task(id, fn) { $(id).addEventListener('click', async () => { $(id).disabled = true; try { await fn(); } catch (e) { notify(e.message || 'Something went wrong.', true); } finally { $(id).disabled = false; } }); }
 
+function grow() { const el = $('goal'); el.style.height = 'auto'; el.style.height = `${Math.min(el.scrollHeight, 240)}px`; }
+// There is no Continue button any more: a dead end stops the run and puts the task back in the box.
+function halt(run, message) { const goal = run?.goal || ''; stop(); if (goal) { $('goal').value = goal; grow(); } if (message) notify(message, true); }
+
 /* ---------- tabs ---------- */
 async function listTabs() { const { tabs } = await send('tabs'); tabCache = tabs; const ids = new Set(tabs.map(t => t.id)); if (!ids.has(actingTabId)) actingTabId = (tabs.find(t => t.active) || tabs[0])?.id ?? null; contextIds = contextIds.filter(id => ids.has(id) && id !== actingTabId); renderTabs(); return tabs; }
 function shortTitle(t) { const s = (t.title || t.url).trim(); return s.length > 60 ? s.slice(0, 60) + '…' : s; }
@@ -54,9 +57,9 @@ function renderTabs() {
   if (!tabCache.length) box.textContent = 'No tabs found.';
   for (const t of tabCache) {
     const row = document.createElement('div'); row.className = 'tab-row' + (t.id === actingTabId ? ' acting' : '');
-    const act = document.createElement('button'); act.type = 'button'; act.className = 'tab-btn' + (t.id === actingTabId ? ' on' : ''); act.textContent = '★'; act.title = 'Act in this tab'; act.setAttribute('aria-label', `Act in ${shortTitle(t)}`);
+    const act = document.createElement('button'); act.type = 'button'; act.className = 'tab-btn' + (t.id === actingTabId ? ' on' : ''); setIcon(act, 'star', 12); act.title = 'Act in this tab'; act.setAttribute('aria-label', `Act in ${shortTitle(t)}`);
     act.addEventListener('click', async () => { actingTabId = t.id; contextIds = contextIds.filter(id => id !== t.id); renderTabs(); try { await permission(t.url); } catch (e) { notify(e.message || 'Site access was not granted.', true); } });
-    const ctx = document.createElement('button'); ctx.type = 'button'; ctx.className = 'tab-btn' + (contextIds.includes(t.id) ? ' on' : ''); ctx.textContent = '+'; ctx.title = 'Include as read-only context'; ctx.setAttribute('aria-label', `Include ${shortTitle(t)} as context`);
+    const ctx = document.createElement('button'); ctx.type = 'button'; ctx.className = 'tab-btn' + (contextIds.includes(t.id) ? ' on' : ''); setIcon(ctx, 'plus', 12); ctx.title = 'Include as read-only context'; ctx.setAttribute('aria-label', `Include ${shortTitle(t)} as context`);
     ctx.addEventListener('click', async () => { if (t.id === actingTabId) return; contextIds = contextIds.includes(t.id) ? contextIds.filter(id => id !== t.id) : [...contextIds, t.id].slice(0, 5); renderTabs(); if (contextIds.includes(t.id)) { try { await permission(t.url); } catch (e) { notify(e.message || 'Site access was not granted.', true); } } });
     const label = document.createElement('span'); label.className = 'tab-label'; label.textContent = shortTitle(t); label.title = t.url;
     if (!t.supported) { const tag = document.createElement('span'); tag.className = 'tab-tag'; tag.textContent = 'unsupported'; label.append(' ', tag); }
@@ -81,7 +84,7 @@ async function persist() {
 }
 function welcome() {
   const box = document.createElement('div'); box.className = 'welcome';
-  const icon = document.createElement('span'); icon.className = 'welcome-icon'; icon.textContent = '✳';
+  const icon = document.createElement('span'); icon.className = 'welcome-icon'; setIcon(icon, 'asterisk', 15);
   const body = document.createElement('div');
   const strong = document.createElement('strong'); strong.textContent = 'Ready.';
   const p = document.createElement('p'); p.textContent = "Type a task and I'll use the starred tab, plan only when it helps, act on my own, and tick steps off only once they actually change the page. Type / for commands or @ to add another tab as context.";
@@ -93,7 +96,7 @@ function renderMessage(message) {
     const details = document.createElement('details'); details.className = 'activity' + (message.failure ? ' failed' : '');
     const summary = document.createElement('summary');
     const badges = `${message.failure ? ' · failed' : message.changed === false ? ' · no visible change' : ''}${message.fallback ? ' · retried with a scripted click' : ''}`;
-    summary.textContent = `${ICONS[message.type] || '✳'}  ${String(message.type || 'step').charAt(0).toUpperCase() + String(message.type || 'step').slice(1)}${message.elapsed ? ` · ${(message.elapsed / 1000).toFixed(1)}s` : ''}${badges}`;
+    summary.append(phosphor(ICONS[message.type] || 'sparkle', 13), document.createTextNode(`  ${String(message.type || 'step').charAt(0).toUpperCase() + String(message.type || 'step').slice(1)}${message.elapsed ? ` · ${(message.elapsed / 1000).toFixed(1)}s` : ''}${badges}`));
     const thought = document.createElement('p'); thought.textContent = message.text || 'Action completed.';
     details.append(summary, thought);
     if (message.page) { const page = document.createElement('p'); page.className = 'page-url'; page.textContent = `Webpage: ${message.page}`; details.append(page); }
@@ -135,7 +138,7 @@ function renderPlan() {
   $('plan-clear').hidden = !!workflow;
   for (const item of plan) {
     const li = document.createElement('li'); li.className = 'plan-item' + (item.done ? ' done' : '');
-    const mark = document.createElement('button'); mark.type = 'button'; mark.className = 'plan-mark'; mark.textContent = item.done ? '✓' : '○';
+    const mark = document.createElement('button'); mark.type = 'button'; mark.className = 'plan-mark'; setIcon(mark, item.done ? 'check' : 'circle', 13);
     mark.title = item.done ? 'Mark as not done' : 'Mark as done';
     mark.setAttribute('aria-label', `${mark.title}: ${item.title}`);
     mark.addEventListener('click', () => { item.done = !item.done; renderPlan(); persist().catch(() => {}); });
@@ -222,17 +225,22 @@ function exportChat() {
 /* ---------- workflow ---------- */
 function stop() {
   workflow = null; proposal = null; currentAction(null);
-  $('approval').hidden = true; $('continue').hidden = true; $('stop').hidden = true; $('start').hidden = false;
-  $('goal').disabled = false; $('mode').disabled = false; $('loading').hidden = true; $('continue').textContent = CONTINUE;
+  $('approval').hidden = true; $('stop').hidden = true; $('start').hidden = false;
+  $('goal').disabled = false; $('mode').disabled = false; $('loading').hidden = true;
   setStatus('');
   renderPlan(); persist().catch(() => {});
 }
-function loading(label, icon) { $('loading-label').textContent = label; $('loading-icon').textContent = icon; $('loading').hidden = false; setStatus(label); }
+function loading(label, icon = 'spinner-gap') {
+  $('loading-label').textContent = label;
+  setIcon($('loading-icon'), icon, 17);
+  $('loading-icon').classList.toggle('spin', icon === 'spinner-gap' || icon === 'circle-notch');
+  $('loading').hidden = false; setStatus(label);
+}
 function currentAction(label) {
   const existing = $('current-action');
   if (!label) { existing?.remove(); return; }
-  if (existing) existing.textContent = `● ${label}`;
-  else { const row = document.createElement('div'); row.id = 'current-action'; row.className = 'message current'; row.textContent = `● ${label}`; $('steps').append(row); }
+  if (existing) existing.replaceChildren(phosphor('sparkle', 11), document.createTextNode(` ${label}`));
+  else { const row = document.createElement('div'); row.id = 'current-action'; row.className = 'message current'; row.replaceChildren(phosphor('sparkle', 11), document.createTextNode(` ${label}`)); $('steps').append(row); }
   $('current-action').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
 function recordActivity(action, url, result, elapsed, failure, meta = {}) {
@@ -287,7 +295,6 @@ function showProposal(run, action, queued, quiet = false) {
 async function next(run, prefetched) {
   if (workflow !== run) return;
   if (run.steps.length >= STEP_LIMIT) { pushMessage('note', `Stopped at the ${STEP_LIMIT}-action limit. Start a new chat to keep going.`); stop(); return; }
-  $('continue').textContent = CONTINUE;
   await listTabs().catch(() => {});
   const acting = tabCache.find(t => t.id === run.actingTabId) || tabCache.find(t => t.active) || tabCache[0];
   if (!acting) throw new Error('No open tab found. Open a webpage first.');
@@ -295,9 +302,9 @@ async function next(run, prefetched) {
   run.actingTabId = acting.id;
   const contexts = tabCache.filter(t => run.contextIds.includes(t.id) && t.id !== acting.id && t.supported).slice(0, 5);
   try { await permission(); }
-  catch (e) { if (workflow !== run) return; $('continue').hidden = false; $('loading').hidden = true; setStatus(''); notify(e.message, true); return; }
+  catch (e) { if (workflow !== run) return; halt(run, e.message); return; }
   let shot = prefetched;
-  if (!shot) { loading(`Reading ${shortTitle(acting)}`, '◉'); shot = await send('observe', { tabId: acting.id, activate: true }); if (workflow !== run) return; }
+  if (!shot) { loading(`Reading ${shortTitle(acting)}`, 'eye'); shot = await send('observe', { tabId: acting.id, activate: true }); if (workflow !== run) return; }
   const hash = textHash(shot.text);
   run.stalled = hash === run.lastHash ? (run.stalled || 0) + 1 : 0;
   run.apiRetries = 0;
@@ -312,7 +319,7 @@ async function next(run, prefetched) {
   const refs = Array.isArray(shot.refs) ? shot.refs : [];
   run.view = { tabId: shot.tabId, url: shot.url, width: shot.width, height: shot.height, naturalWidth: image.naturalWidth, naturalHeight: image.naturalHeight };
   const done = plan.filter(item => item.done).length;
-  loading(plan.length ? `Thinking · ${done}/${plan.length} plan steps · action ${run.steps.length + 1}/${STEP_LIMIT}` : `Thinking about action ${run.steps.length + 1}`, '✳');
+  loading(plan.length ? `Thinking · ${done}/${plan.length} plan steps · action ${run.steps.length + 1}/${STEP_LIMIT}` : `Thinking about action ${run.steps.length + 1}`, 'sparkle');
   // Vision is a fallback: it is only attached for thin trees or when the model asks for it.
   const sendImage = run.wantShot || refs.length < 15;
   const started = performance.now();
@@ -330,15 +337,13 @@ async function next(run, prefetched) {
     pushMessage('agent', finish.summary || 'Workflow complete.');
     if (incomplete?.length) {
       const titles = plan.filter(item => incomplete.includes(item.id)).map(item => item.title);
-      if (run.mode !== 'manual' && (run.keepGoing || 0) < 2) {
+      if (run.mode !== 'manual' && (run.keepGoing || 0) < 4) {
         run.keepGoing = (run.keepGoing || 0) + 1;
         pushMessage('note', `${titles.length} plan step${titles.length === 1 ? '' : 's'} still open (${titles.join(' · ')}), so I’ll keep going instead of finishing.`);
         $('loading').hidden = true;
         return next(run);
       }
-      $('loading').hidden = true; $('approval').hidden = true; setStatus('');
-      $('continue').hidden = false; $('stop').hidden = false; $('continue').textContent = 'Keep working on the plan ↗';
-      notify(`Proposed finishing with ${titles.length} unchecked plan step${titles.length === 1 ? '' : 's'}: ${titles.join(' · ')}. Keep working, or Stop.`);
+      halt(run, `Stopped with ${titles.length} unchecked plan step${titles.length === 1 ? '' : 's'}: ${titles.join(' · ')}. The task is back in the box for another pass.`);
       return;
     }
     const run_ = run; stop(); notify('Workflow complete.'); return run_;
@@ -360,7 +365,18 @@ async function runBatch(run) {
     const action = run.queue.shift();
     const outcome = await executeOne(run, showProposal(run, action, run.queue.length, true));
     if (outcome === 'recover') { await sleep(300); if (workflow === run) await safeNext(run); return; }
-    if (outcome !== 'ok') { $('loading').hidden = true; $('continue').hidden = false; $('stop').hidden = false; setStatus(''); return; }
+    if (outcome !== 'ok') {
+      // Recover in place: re-observe and let the model pick a different route before giving up.
+      if (outcome === 'failed' && run.mode !== 'manual' && (run.hardFails || 0) < 2) {
+        run.hardFails = (run.hardFails || 0) + 1;
+        pushMessage('note', 'That step kept failing, so I’ll look at the page again and try a different route.');
+        await sleep(700);
+        if (workflow === run) await safeNext(run);
+        return;
+      }
+      halt(run, 'Stopped where the page would not accept the action. The task is back in the box to retry.');
+      return;
+    }
     if (run.queue.length) { loading('Next queued action', '◌'); await sleep(220); }
   }
   if (workflow !== run) return;
@@ -380,7 +396,7 @@ async function safeNext(run) {
       if (workflow === run) return safeNext(run);
       return;
     }
-    $('loading').hidden = true; $('continue').hidden = false; setStatus(''); notify(e.message || 'Could not continue. Select Continue to retry.', true);
+    halt(run, e.message || 'Could not continue.');
   }
 }
 async function executeOne(run, current) {
@@ -415,7 +431,7 @@ async function executeOne(run, current) {
       notify(`${label}. Trying a different approach instead of stopping.`, true);
       return 'recover';
     }
-    notify(`${label} The agent will try a different approach when you continue.`, true);
+    notify(`${label} Trying a different approach instead of ending the run.`, true);
     return 'failed';
   }
   if (workflow !== run) return 'stop';
@@ -441,11 +457,10 @@ async function startWorkflow(goal) {
   const run = workflow;
   plan = [];
   pushMessage('user', goal);
-  $('goal').value = ''; $('goal').style.height = '';
+  $('goal').value = ''; grow();
   $('suggest').hidden = true;
   $('start').hidden = true; $('stop').hidden = false; $('goal').disabled = true; $('mode').disabled = true;
-  $('continue').hidden = true; $('continue').textContent = CONTINUE;
-  loading('Reading the page', '◉');
+  loading('Reading the page', 'eye');
   send('group', { tabId: acting.id }).catch(() => {});
   try {
     const observed = send('observe', { tabId: acting.id, activate: true });
@@ -467,7 +482,7 @@ async function startWorkflow(goal) {
     await next(run, shot.value);
   } catch (e) {
     if (workflow !== run) return;
-    $('loading').hidden = true; $('continue').hidden = false; setStatus('');
+    $('loading').hidden = true; setStatus('');
     throw e;
   }
 }
@@ -529,7 +544,7 @@ $('composer').addEventListener('submit', async event => {
   try { await startWorkflow(goal); } catch (e) { notify(e.message || 'Something went wrong.', true); }
 });
 $('goal').addEventListener('keydown', event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); $('composer').requestSubmit(); } });
-$('goal').addEventListener('input', () => { $('goal').style.height = 'auto'; $('goal').style.height = `${Math.min($('goal').scrollHeight, 160)}px`; renderSuggest(); });
+$('goal').addEventListener('input', () => { grow(); renderSuggest(); });
 $('goal').addEventListener('blur', () => setTimeout(hideSuggest, 150));
 $('mode').addEventListener('change', () => { mode = $('mode').value; chrome.storage.local.set({ mode }); notify(mode === 'autopilot' ? 'Autopilot: actions run without asking.' : mode === 'auto' ? 'Auto: runs freely but pauses before risky steps.' : 'Approve each round before it runs.'); });
 $('new-chat').addEventListener('click', () => { newChat().catch(e => notify(e.message || 'Could not start a chat.', true)); });
@@ -553,7 +568,6 @@ $('history-dialog').addEventListener('click', event => { if (event.target === $(
 $('saw-dialog').addEventListener('click', event => { if (event.target === $('saw-dialog')) $('saw-dialog').close(); });
 $('plan-clear').addEventListener('click', () => { if (workflow) return; plan = []; renderPlan(); persist().catch(() => {}); });
 task('approve', async () => { const run = workflow; if (!run) throw new Error('Start a task first.'); if (!run.queue?.length) throw new Error('Nothing queued — send a message to continue.'); if (run.queue[0]?.type === 'navigate') await permission(run.queue[0].url); if (workflow !== run) return; $('approval').hidden = true; await runBatch(run); });
-task('continue', async () => { const run = workflow; if (!run) return; await listTabs().catch(() => {}); const acting = tabCache.find(t => t.id === run.actingTabId) || tabCache.find(t => t.active); if (acting) await permission(acting.url); else await permission(await activeUrl()); if (workflow !== run) return; $('continue').hidden = true; try { await next(run); } catch (e) { if (workflow === run) { $('loading').hidden = true; $('continue').hidden = false; setStatus(''); } throw e; } });
 $('tabs-refresh').addEventListener('click', async () => { try { await listTabs(); } catch (e) { notify(e.message || 'Could not list tabs.', true); } });
 $('tabs-current').addEventListener('click', async () => { try { const [tab] = await chrome.tabs.query({ active: true, currentWindow: true }); if (!tab?.id) throw new Error('Select a webpage first.'); actingTabId = tab.id; contextIds = contextIds.filter(id => id !== tab.id); renderTabs(); await permission(tab.url); } catch (e) { notify(e.message || 'Something went wrong.', true); } });
 $('reject').addEventListener('click', () => { stop(); notify('Stopped without taking the proposed action.'); });

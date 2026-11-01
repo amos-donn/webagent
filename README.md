@@ -28,13 +28,15 @@ Provider references: [OpenRouter free router](https://openrouter.ai/docs/guides/
 
 ## Chats, commands and approval modes
 
-Every task is a chat. Chats are stored in Chrome extension storage (up to 20, newest first), survive closing the panel and reloading the browser, and can be reopened from the ☰ button. `Export .md` writes the current chat, its plan and its step log to Markdown, and `Delete all` clears them.
+Every task is a chat. Chats are stored in Chrome extension storage (up to 20, newest first), survive closing the panel and reloading the browser, and can be reopened from the chats button. `Export .md` writes the current chat, its plan and its step log to Markdown, and `Delete all` clears them.
 
 The message box understands two shortcuts: `/` opens commands (`/new`, `/chats`, `/export`, `/plan`, `/noplan`, `/auto-plan`, `/saw`, `/stop`) and `@` adds another open tab as read-only context.
 
 A checklist is optional: the planner returns no steps for short tasks, so a one-click job runs without one. Use `/plan` to force a checklist for every task or `/noplan` to skip it.
 
-The mode picker next to the send button mirrors the three modes Claude in Chrome offers: **Ask each round** pauses for approval, **Auto** runs freely but pauses before steps that look irreversible (paying, deleting, sending, submitting, sharing, uploading, or typing password/card-like text), and **Autopilot** never pauses. The starred tab is added to a `webagent` tab group when a task starts, and ◉ shows the exact screenshot the last decision was made from.
+The message box is one tall field with the mode picker and the send button inside it, and nothing else stacked underneath. While a task runs, the send button is replaced by a large stop control in the same corner. There is no Continue button: the agent carries on to the next step by itself, and only a dead end stops the run and drops the task back into the box to resend. All panel icons are [Phosphor](https://phosphoricons.com) geometry vendored in `extension/icons.js`, so nothing is fetched from the network.
+
+The mode picker mirrors the three modes Claude in Chrome offers: **Ask each round** pauses for approval, **Auto** runs freely but pauses before steps that look irreversible (paying, deleting, sending, submitting, sharing, uploading, or typing password/card-like text), and **Autopilot** never pauses. The starred tab is added to a `webagent` tab group when a task starts, and the eye button shows the exact screenshot the last decision was made from.
 
 ## Accessibility refs, safety boundary, skills, evals and the MCP bridge
 

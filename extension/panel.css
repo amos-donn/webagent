@@ -24,3 +24,30 @@ button.plan-mark:hover { opacity: .75; }
 .history-open:hover{background:#f1f5ed}
 .history-open strong{font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%}
 .history-time{font-size:10px;color:#93a295;font-weight:400}
+
+/* Composer: one tall box, send inside it, nothing beneath but the disclosure line. */
+.ph{display:block;flex:none}
+.ph path,svg.ph{pointer-events:none}
+.composer{background:var(--paper);border-top:0;padding:8px 12px calc(12px + env(safe-area-inset-bottom))}
+.composer-box{position:relative;background:#fff;border:1px solid #dce6d9;border-radius:18px;box-shadow:0 8px 26px rgba(41,65,44,.07);padding:2px 2px 6px;transition:border-color .16s ease,box-shadow .16s ease}
+.composer-box:focus-within{border-color:#8bab83;box-shadow:0 0 0 3px #edf4e8,0 10px 30px rgba(41,65,44,.1)}
+.composer textarea{border:0;background:transparent;box-shadow:none;border-radius:16px;min-height:104px;max-height:240px;padding:13px 14px 4px;font-size:13.5px;line-height:1.55}
+.composer textarea:focus{border:0;box-shadow:none}
+.composer textarea:disabled{background:transparent;color:#8b9a8d}
+.composer textarea::placeholder{color:#a6b2a6}
+.composer-bar{display:flex;align-items:flex-end;justify-content:space-between;gap:8px;padding:0 5px 0 6px}
+.composer-actions{display:flex;align-items:center;gap:6px}
+.send{width:38px;height:38px;border-radius:12px;border:0;padding:0;display:grid;place-items:center;background:var(--green);color:#fff;cursor:pointer;transition:background .15s ease,transform .1s ease,width .15s ease,height .15s ease}
+.send:hover:not(:disabled){background:#214839}
+.send:active:not(:disabled){transform:scale(.96)}
+.send .ph{width:18px;height:18px}
+.send.stop{width:48px;height:48px;border-radius:15px;background:#22312a;color:#fff;box-shadow:0 6px 18px rgba(34,49,42,.3)}
+.send.stop:hover:not(:disabled){background:#182420}
+.send.stop .ph{width:26px;height:26px}
+.footnote{margin:7px 4px 0;text-align:center}
+.message.current{display:flex;align-items:center;gap:6px;color:#4e6554}
+.loading-icon{color:#4b7a5c}
+.loading-icon.spin .ph{animation:spin .9s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.icon-btn .ph{opacity:.9}
+button.plan-mark{display:grid;place-items:center;line-height:1}
