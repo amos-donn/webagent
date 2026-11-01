@@ -390,14 +390,17 @@ export default {
         const lines = value => (Array.isArray(value) ? value : []).slice(0, 6).map(item => clip(typeof item === 'string' ? item : item?.text, 200).trim()).filter(Boolean);
         // An unrecognised verdict is treated as unconfirmed, never as a pass.
         const verdict = ['passed', 'partial', 'failed'].includes(parsed.verdict) ? parsed.verdict : 'partial';
+        const problem = clip(parsed.problem, 400);
         return json({
           verdict,
           headline: clip(parsed.headline, 160),
           did: lines(parsed.did),
           failed: lines(parsed.failed),
           blocked: lines(parsed.blocked),
-          needsWork: verdict !== 'passed' && parsed.needsWork === true,
-          problem: clip(parsed.problem, 400),
+          // A named but unmet goal with a suggested next step is worth another pass, even when the
+          // model forgot to set the flag; the panel caps the retries either way.
+          needsWork: verdict !== 'passed' && (parsed.needsWork === true || (verdict === 'failed' && !!problem)),
+          problem,
           summary: clip(parsed.summary, 800),
           pausedForUser: !!input.pausedForUser,
           ms, model

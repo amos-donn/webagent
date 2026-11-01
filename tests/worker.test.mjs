@@ -351,6 +351,18 @@ test('the review endpoint checks the outcome instead of trusting the closing cla
 });
 
 test('an unrecognised review verdict is unconfirmed, and a pass can never ask for more work', async () => {
+  const unmet = scripted([{ verdict:'failed', problem:'Open the pricing page first.', summary:'Nothing was read.' }]);
+  try {
+    const out = await (await worker.fetch(request({ goal:'Read the price', claim:'Read it', url:'https://example.com/', text:'Example Domain', steps:[] }, '/review'), { DB:db, GEMINI_API_KEY:'test-key' })).json();
+    assert.equal(out.verdict, 'failed');
+    assert.equal(out.needsWork, true, 'a failed check with a suggested next step is worth one more pass');
+    assert.equal(out.problem, 'Open the pricing page first.');
+  } finally { unmet.restore(); }
+  const stuck = scripted([{ verdict:'failed', blocked:['The page needs a password'], summary:'Sign-in blocked the run.' }]);
+  try {
+    const out = await (await worker.fetch(request({ goal:'Read the price', claim:'Read it', url:'https://example.com/', text:'Sign in', steps:[] }, '/review'), { DB:db, GEMINI_API_KEY:'test-key' })).json();
+    assert.equal(out.needsWork, false, 'a blocked run is reported, not retried');
+  } finally { stuck.restore(); }
   const odd = scripted([{ verdict:'great job', needsWork:true, summary:'Fine.' }]);
   try {
     const out = await (await worker.fetch(request({ goal:'Read the price', claim:'Read it', url:'https://example.com/pricing', text:'9 EUR', steps:[] }, '/review'), { DB:db, GEMINI_API_KEY:'test-key' })).json();
