@@ -133,19 +133,12 @@ async function readPage(tabId) {
   return result;
 }
 async function shoot(tabId) {
-  // The agent must never see its own cursor in a decision screenshot.
-  await chrome.scripting.executeScript({ target: { tabId }, func: pointerVisibility, args: [true] }).catch(() => {});
-  await sleep(50);
-  try {
-    return await debug(tabId, async target => {
-      const metrics = await chrome.debugger.sendCommand(target, 'Page.getLayoutMetrics');
-      const viewport = metrics.cssVisualViewport || metrics.visualViewport;
-      const image = await chrome.debugger.sendCommand(target, 'Page.captureScreenshot', { format: 'jpeg', quality: 65, fromSurface: true });
-      return { image: image.data, width: viewport.clientWidth, height: viewport.clientHeight };
-    });
-  } finally {
-    await chrome.scripting.executeScript({ target: { tabId }, func: pointerVisibility, args: [false] }).catch(() => {});
-  }
+  return debug(tabId, async target => {
+    const metrics = await chrome.debugger.sendCommand(target, 'Page.getLayoutMetrics');
+    const viewport = metrics.cssVisualViewport || metrics.visualViewport;
+    const image = await chrome.debugger.sendCommand(target, 'Page.captureScreenshot', { format: 'jpeg', quality: 65, fromSurface: true });
+    return { image: image.data, width: viewport.clientWidth, height: viewport.clientHeight };
+  });
 }
 // Accessibility tree: the primary grounding channel. Refs are stable handles for semantic nodes.
 async function axSnapshot(tabId) {
@@ -427,18 +420,11 @@ function pointerPress() {
     [{ transform: 'scale(.2)', opacity: .9 }, { transform: 'scale(1)', opacity: 0 }],
     { duration: 420, easing: 'cubic-bezier(.16,.8,.32,1)' }
   );
-  // A pop that grows past full size, not a shrink-and-blink: the scale origin is the arrow tip, so
-  // the tip stays on the point while the body springs outwards.
+  // A press: the tip stays on the point while the body dips and springs back.
   arrow.animate(
-    [{ transform: 'scale(1)' }, { transform: 'scale(1.28)', offset: .3 }, { transform: 'scale(1)' }],
-    { duration: 260, easing: 'cubic-bezier(.34,1.56,.64,1)' }
+    [{ transform: 'scale(1)' }, { transform: 'scale(.86)' }, { transform: 'scale(1)' }],
+    { duration: 190, easing: 'ease-out' }
   );
-  return true;
-}
-function pointerVisibility(hidden) {
-  const host = document.getElementById('webagent-pointer');
-  if (!host) return false;
-  host.style.visibility = hidden ? 'hidden' : 'visible';
   return true;
 }
 async function pointerEnabled() {
