@@ -1,13 +1,31 @@
 {
   "manifest_version": 3,
-  "name": "Webagent — Browser Agent",
-  "version": "1.1.9",
+  "name": "Mezze — Browser Agent",
+  "version": "1.2.0",
   "description": "A side-panel agent for multi-step browser workflows.",
   "minimum_chrome_version": "116",
-  "permissions": ["sidePanel", "storage", "unlimitedStorage", "tabs", "scripting", "debugger"],
-  "optional_host_permissions": ["https://*/*", "http://*/*"],
-  "background": { "service_worker": "background.js" },
-  "side_panel": { "default_path": "panel.html" },
-  "action": { "default_title": "Open Webagent" },
-  "content_security_policy": { "extension_pages": "script-src 'self'; object-src 'self'" }
+  "permissions": [
+    "sidePanel",
+    "storage",
+    "unlimitedStorage",
+    "tabs",
+    "scripting",
+    "debugger"
+  ],
+  "optional_host_permissions": [
+    "https://*/*",
+    "http://*/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "side_panel": {
+    "default_path": "panel.html"
+  },
+  "action": {
+    "default_title": "Open Mezze"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'"
+  }
 }

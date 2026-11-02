@@ -389,7 +389,7 @@ function download(name, text) {
   setTimeout(() => URL.revokeObjectURL(url), 5000);
 }
 function markdown(target) {
-  const lines = [`# ${target.title || 'Webagent chat'}`, '', `Goal: ${target.goal || '(none)'}`, `Started: ${new Date(target.at || Date.now()).toLocaleString()}`, ''];
+  const lines = [`# ${target.title || 'Mezze chat'}`, '', `Goal: ${target.goal || '(none)'}`, `Started: ${new Date(target.at || Date.now()).toLocaleString()}`, ''];
   if (target.plan?.length) {
     lines.push('## Plan', '');
     for (const item of target.plan) lines.push(`- [${item.done ? 'x' : ' '}] ${item.title}`);
@@ -402,14 +402,14 @@ function markdown(target) {
       lines.push(`- ${message.type}${badges}: ${message.text}${message.page ? ` — ${message.page}` : ''}`);
     } else if (message.role === 'thought') lines.push(`_${message.text}_`);
     else if (message.role === 'note') lines.push(`> ${message.text}`);
-    else lines.push(`**${message.role === 'user' ? 'You' : 'Webagent'}:** ${message.text}`, '');
+    else lines.push(`**${message.role === 'user' ? 'You' : 'Mezze'}:** ${message.text}`, '');
   }
   return lines.join('\n');
 }
 function exportChat() {
   const target = chat;
   if (!target) return;
-  download(`webagent-${(target.title || 'chat').toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 40)}.md`, markdown(target));
+  download(`mezze-${(target.title || 'chat').toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 40)}.md`, markdown(target));
   notify('Exported this chat as Markdown.');
 }
 
