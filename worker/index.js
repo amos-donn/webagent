@@ -5,11 +5,11 @@ const DEFAULT_SPEED = 'fast';
 const DEFAULT_MODEL = SPEED_MODELS[DEFAULT_SPEED];
 const speedOf = value => (typeof value === 'string' && Object.prototype.hasOwnProperty.call(SPEED_MODELS, value) ? value : DEFAULT_SPEED);
 const GEMINI_ROOT = 'https://generativelanguage.googleapis.com/v1beta/models/';
-const ACTION_TYPES = ['think', 'click', 'type', 'write', 'read', 'scroll', 'wait', 'navigate', 'switch', 'key', 'fill', 'open', 'gather', 'close', 'done'];
+const ACTION_TYPES = ['think', 'click', 'type', 'write', 'read', 'scroll', 'wait', 'navigate', 'switch', 'key', 'fill', 'open', 'gather', 'close', 'transcribe', 'done'];
 const KEY_NAMES = ['Enter', 'Escape', 'Tab', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'PageUp', 'PageDown', 'Home', 'End', 'Backspace', 'Delete', 'Insert', 'Space'];
 const KEY_ALIASES = { esc: 'Escape', return: 'Enter', space: 'Space', up: 'ArrowUp', down: 'ArrowDown', left: 'ArrowLeft', right: 'ArrowRight', pgup: 'PageUp', pgdn: 'PageDown', pageup: 'PageUp', pagedown: 'PageDown', del: 'Delete', insert: 'Insert', home: 'Home', end: 'End', tab: 'Tab', enter: 'Enter', backspace: 'Backspace' };
 const MODIFIER_NAMES = { ctrl: 'Control', control: 'Control', shift: 'Shift', alt: 'Alt', option: 'Alt', meta: 'Meta', cmd: 'Meta', command: 'Meta' };
-const BATCHABLE_EXCLUSIONS = ['think', 'read', 'wait', 'navigate', 'switch', 'done', 'fill', 'write', 'open', 'gather', 'close'];const MAX_BATCH = 4;
+const BATCHABLE_EXCLUSIONS = ['think', 'read', 'wait', 'navigate', 'switch', 'done', 'fill', 'write', 'open', 'gather', 'close', 'transcribe'];const MAX_BATCH = 4;
 const MAX_FIELDS = 12;
 const REF = /^e\d{1,3}$/;
 const TAB_REF = /^t\d{1,2}$/;
@@ -267,8 +267,7 @@ function readActions(parsed, input) {
   if (list && !Array.isArray(list)) list = [list];
   if (!list || !list.length) throw new Error('The agent returned an unsupported action.');
   if (list.length > MAX_BATCH) throw new Error(`At most ${MAX_BATCH} batched actions are allowed.`);
-  const actions = list.map(item => readAction(item, input));
-  if (actions.length > 1 && actions.some(action => BATCHABLE_EXCLUSIONS.includes(action.type))) throw new Error('done, navigate, switch, wait, read, fill, think and the tab actions cannot be batched with other actions.');
+  const actions = list.map(item => readAction(item, input));    if (actions.length > 1 && actions.some(action => BATCHABLE_EXCLUSIONS.includes(action.type))) throw new Error('done, navigate, switch, wait, read, fill, think, transcribe and the tab actions cannot be batched with other actions.');
   return actions;
 }
 function completedIds(raw, todos) {
@@ -297,6 +296,7 @@ function agentPrompt(input, page, todos, steps, contexts, elements, refs, correc
     'Never repeat an action that the history marks as failed, blocked or as causing no page change — try a different element, scroll, read, or send key events.',
     'A step that already worked is finished. PROVEN DONE lists the controls this run already activated; do not click one of them again to "make sure", and do not re-check a plan item that is already ticked. After a successful click, the next action is whatever the goal needs next.',
     'Use read when the visible text is not enough, wait when the page is still loading, and key for keyboard input.',
+    'SPOKEN CONTENT: when the page is a video, a talk, a podcast or a recording and the goal depends on what is said, use transcribe — do not answer from the title, the description or a guess. One transcribe action returns the transcript as its step result, and it runs in real time, so use it once and then answer from the text you were given. A page with no media, or audio with no speech, says so; report that instead of describing the page as if you had heard it.',
     'TABS: you act in one tab at a time, and the TABS list gives every open tab an id (t1, t2). Use open to work in a new tab — a second source, a comparison, a site the task needs next — instead of navigating away from a page the user still needs or that holds unsaved work. After open you are acting in that new tab and the next observation is that page.',
     'Use switch to go back to another tab and act there, and gather to read 1 to 5 tabs in one call without switching. Chain them on purpose: gather the facts from a research tab, switch to the tab you are editing, and use what you learned. Do not gather the tab you are already acting in.',
     'Use close only on a tab you opened earlier in this run, and only when you are done with it; never close one of the user\u2019s own tabs. Three new tabs is the ceiling for one task — reuse a tab before opening another.',
@@ -333,6 +333,7 @@ Every action needs a "description" (what and why). Failures come back with a cod
 - switch: {"type":"switch","tab":"t2","description":"..."} — make a tab from the TABS list the acting page (always on its own); you see that page in the next round
 - gather: {"type":"gather","tabs":["t2","t3"],"description":"..."} — read those tabs at once; their text comes back as the step result (always on its own)
 - close: {"type":"close","tab":"t3","description":"..."} — close a tab you opened in this run (always on its own)
+- transcribe: {"type":"transcribe","description":"..."} — transcribe the speech of the video or audio playing on this page; the transcript comes back as the step result (always on its own, and it takes as long as the media runs)
 - think: {"type":"think","description":"..."} (no page change; use sparingly)
 - done: {"type":"done","summary":"answer to the user's goal","unfinished":["ids you could not complete"]} (always on its own)
 ${vision}
