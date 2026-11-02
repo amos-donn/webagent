@@ -1,8 +1,9 @@
 {
   "manifest_version": 3,
-  "name": "Mezze — Browser Agent",
-  "version": "1.6.0",
-  "description": "A side-panel agent for multi-step browser workflows.",
+  "name": "__MSG_extName__",
+  "version": "1.7.0",
+  "default_locale": "en",
+  "description": "__MSG_extDesc__",
   "minimum_chrome_version": "116",
   "permissions": [
     "sidePanel",
@@ -10,8 +11,34 @@
     "unlimitedStorage",
     "tabs",
     "scripting",
-    "debugger"
+    "debugger",
+    "alarms",
+    "notifications",
+    "tabGroups",
+    "contextMenus"
   ],
+  "commands": {
+    "_execute_action": {
+      "suggested_key": {
+        "default": "Alt+Shift+M"
+      }
+    },
+    "ask-selection": {
+      "suggested_key": {
+        "default": "Alt+Shift+S"
+      },
+      "description": "Ask Mezze about the selection"
+    },
+    "summarise-page": {
+      "suggested_key": {
+        "default": "Alt+Shift+P"
+      },
+      "description": "Summarise this page with Mezze"
+    }
+  },
+  "icons": {
+    "128": "icon128.png"
+  },
   "optional_host_permissions": [
     "https://*/*",
     "http://*/*"
@@ -23,7 +50,7 @@
     "default_path": "panel.html"
   },
   "action": {
-    "default_title": "Open Mezze"
+    "default_title": "__MSG_actionTitle__"
   },
   "content_security_policy": {
     "extension_pages": "script-src 'self'; object-src 'self'"

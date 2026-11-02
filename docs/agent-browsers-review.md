@@ -312,3 +312,23 @@ nothing stored on someone else's server.
 5. A per-run cost meter (25), because the bill is the thing that makes people stop using an agent.
 
 Scheduling (8–9) is the honest big one, and it is a background-execution project, not a feature.
+
+## What landed after this review
+
+Version 1.7.0 closes gaps 8, 13, 27, 28 and 31 from the list above, and does the cursor properly.
+
+- **Scheduling** (gap 8) is now real rather than announced: `/every` and `/schedules` on top of
+  `chrome.alarms`, with the next slot booked before a run starts, a per-task run count, and a background
+  tab as the driver so a task works with the side panel closed. It is still not the full answer to gap 9 —
+  the tab is visible runtime, not a headless agent — but it is the honest small version.
+- **Tab groups** (13): tabs the agent navigates are gathered into one green *Mezze* group.
+- **Entry points** (27): `Alt+Shift+M` / `S` / `P` and three context-menu items, with the request left in
+  the composer rather than auto-sent.
+- **Notifications** (28): a finished run that you are not watching says so on the desktop.
+- **UI translation** (31): manifest strings and menu labels via `_locales`, English and Chinese. The panel
+  body is still English; doing that properly is a pass of its own.
+- **The cursor** is a rounded dot with a halo, no arrow and no tail.
+
+Deliberately not done: `chrome.identity`. There is no OAuth client, no account in this design, and
+`getProfileUserInfo` would add an install-time permission warning to show an email address nobody asked
+for. It is a two-line change the day sync exists, and wrong before then.

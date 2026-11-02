@@ -1,3 +1,5 @@
+importScripts('schedule.js');
+
 chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
 const clip = (value, max) => String(value ?? '').slice(0, max);
 class AgentError extends Error { constructor(code, message) { super(message); this.code = code; } }
@@ -393,8 +395,9 @@ async function typeKeys(target, text) {
   }
 }
 // A person watching the tab cannot tell where the agent is clicking: CDP input moves no real
-// pointer. So the cursor is drawn — a purple arrow that slides to the target and ripples where the
-// click lands. Presentation only; every call degrades silently and none of it changes the input.
+// pointer. So a cursor is drawn — a rounded dot with a soft halo and no arrow, because an arrow says
+// "a mouse is here" and this one belongs to the agent. Presentation only; every call degrades
+// silently and none of it changes the input.
 function pointerMove(x, y) {
   const id = 'webagent-pointer';
   let host = document.getElementById(id);
@@ -405,75 +408,57 @@ function pointerMove(x, y) {
     const root = host.attachShadow({ mode: 'open' });
     const style = document.createElement('style');
     style.textContent = '.wrap{position:fixed;left:0;top:0;width:0;height:0;will-change:transform}'
-      + '.arrow{position:absolute;left:-6.25px;top:-3.75px;width:30px;height:30px;transform-origin:6.25px 3.75px;filter:drop-shadow(0 2px 7px rgba(76,29,149,.55));opacity:0}'
-      + '.ring{position:absolute;left:-32px;top:-32px;width:64px;height:64px;border-radius:50%;border:2px solid rgba(168,85,247,.85);background:radial-gradient(circle,rgba(168,85,247,.3),rgba(168,85,247,0) 70%);opacity:0}';
-    const svg = 'http://www.w3.org/2000/svg';
-    const wrap = document.createElement('div'); wrap.className = 'wrap';
-    const ring = document.createElement('span'); ring.className = 'ring';
-    const arrow = document.createElementNS(svg, 'svg');
-    arrow.setAttribute('class', 'arrow'); arrow.setAttribute('viewBox', '0 0 24 24'); arrow.setAttribute('aria-hidden', 'true');
-    const shape = document.createElementNS(svg, 'path');
-    shape.setAttribute('d', 'M5 3 5 19.6 9.4 15.4 12.3 21.6 15.2 20.2 12.3 14.1 18.8 13.6 Z');
-    shape.setAttribute('fill', '#a855f7'); shape.setAttribute('stroke', '#fff');
-    shape.setAttribute('stroke-width', '1.4'); shape.setAttribute('stroke-linejoin', 'round');
-    arrow.append(shape);
-    wrap.append(ring, arrow);
+      + '.dot{position:absolute;left:-8px;top:-8px;width:16px;height:16px;border-radius:50%;background:#157a52;border:2px solid rgba(255,255,255,.9);box-shadow:0 2px 10px rgba(9,60,40,.4),0 0 0 5px rgba(21,122,82,.16);opacity:0}'
+      + '.ring{position:absolute;left:-26px;top:-26px;width:52px;height:52px;border-radius:50%;border:2px solid rgba(21,122,82,.75);background:radial-gradient(circle,rgba(21,122,82,.24),rgba(21,122,82,0) 70%);opacity:0}';
+    const wrap = document.createElement('div');
+    wrap.className = 'wrap';
+    const ring = document.createElement('span');
+    ring.className = 'ring';
+    const dot = document.createElement('span');
+    dot.className = 'dot';
+    dot.setAttribute('aria-hidden', 'true');
+    wrap.append(ring, dot);
     root.append(style, wrap);
     document.documentElement.appendChild(host);
   }
-  const root = host.shadowRoot, wrap = root.querySelector('.wrap'), arrow = root.querySelector('.arrow');
+  const root = host.shadowRoot, wrap = root.querySelector('.wrap'), dot = root.querySelector('.dot');
   const still = matchMedia('(prefers-reduced-motion: reduce)').matches;
   const from = host.dataset.x ? { x: Number(host.dataset.x), y: Number(host.dataset.y) } : null;
   host.dataset.x = String(Math.round(x));
   host.dataset.y = String(Math.round(y));
   const to = `translate3d(${Math.round(x)}px,${Math.round(y)}px,0)`;
   if (!from) {
-    arrow.style.opacity = '1';
-    // First appearance: glide in from the nearest edge of the window, so the cursor looks like it
-    // entered the page rather than materialising on top of the thing it is about to click.
+    dot.style.opacity = '1';
+    // First appearance: glide in from the nearest edge, so the cursor looks like it entered the page
+    // rather than materialising on top of the thing it is about to click.
     const width = (typeof innerWidth === 'number' && innerWidth) || document.documentElement.clientWidth || 1024;
     const offscreen = still ? 26 : 72;
     const startX = Math.round(x) < width / 2 ? -offscreen : width + offscreen;
     const ms = still ? 120 : 380;
     wrap.style.transform = to;
-    wrap.animate(
-      [{ transform: `translate3d(${startX}px,${Math.round(y)}px,0)` }, { transform: to }],
-      { duration: ms, easing: 'cubic-bezier(.22,.61,.36,1)', fill: 'forwards' }
-    ).finished.catch(() => {});
+    wrap.animate([{ transform: `translate3d(${startX}px,${Math.round(y)}px,0)` }, { transform: to }], { duration: ms, easing: 'cubic-bezier(.22,.61,.36,1)', fill: 'forwards' }).finished.catch(() => {});
     return ms;
   }
   // Reduced motion shortens the journey instead of removing it: a zero-length slide reads as "no
   // cursor at all", which defeats the whole point of drawing one.
   const distance = Math.hypot(x - from.x, y - from.y);
-  const ms = still
-    ? Math.min(110, Math.max(60, Math.round(distance * 0.25)))
-    : Math.min(360, Math.max(140, Math.round(distance * 0.9)));
-  arrow.style.opacity = '1';
-  wrap.animate(
-    [{ transform: `translate3d(${from.x}px,${from.y}px,0)` }, { transform: to }],
-    { duration: ms, easing: 'cubic-bezier(.22,.61,.36,1)', fill: 'forwards' }
-  ).finished.catch(() => {});
+  const ms = still ? Math.min(110, Math.max(60, Math.round(distance * 0.25))) : Math.min(360, Math.max(140, Math.round(distance * 0.9)));
+  dot.style.opacity = '1';
+  wrap.animate([{ transform: `translate3d(${from.x}px,${from.y}px,0)` }, { transform: to }], { duration: ms, easing: 'cubic-bezier(.22,.61,.36,1)', fill: 'forwards' }).finished.catch(() => {});
   return ms;
 }
 function pointerPress() {
   const host = document.getElementById('webagent-pointer');
   const root = host && host.shadowRoot;
   if (!root) return false;
-  const ring = root.querySelector('.ring'), arrow = root.querySelector('.arrow');
-  if (!ring || !arrow) return false;
+  const ring = root.querySelector('.ring'), dot = root.querySelector('.dot');
+  if (!ring || !dot) return false;
   if (matchMedia('(prefers-reduced-motion: reduce)').matches) {
     ring.animate([{ transform: 'scale(.35)', opacity: .9 }, { transform: 'scale(.85)', opacity: 0 }], { duration: 260, easing: 'ease-out' });
     return true;
   }
-  ring.animate(
-    [{ transform: 'scale(.2)', opacity: .9 }, { transform: 'scale(1)', opacity: 0 }],
-    { duration: 420, easing: 'cubic-bezier(.16,.8,.32,1)' }
-  );
-  // A press: the tip stays on the point while the body dips and springs back.
-  arrow.animate(
-    [{ transform: 'scale(1)' }, { transform: 'scale(.86)' }, { transform: 'scale(1)' }],
-    { duration: 190, easing: 'ease-out' }
-  );
+  ring.animate([{ transform: 'scale(.2)', opacity: .9 }, { transform: 'scale(1)', opacity: 0 }], { duration: 420, easing: 'cubic-bezier(.16,.8,.32,1)' });
+  dot.animate([{ transform: 'scale(1)' }, { transform: 'scale(.82)' }, { transform: 'scale(1)' }], { duration: 190, easing: 'ease-out' });
   return true;
 }
 async function pointerEnabled() {
@@ -1228,6 +1213,37 @@ async function ensureBridge() {
   } catch { bridgeSocket = null; }
 }
 async function handle(message) {
+  if (message.type === 'notify') { await notifyDone(message.title, message.message); return { shown: true }; }
+  if (message.type === 'pending') {
+    const saved = (await chrome.storage.session.get('pendingPrompt').catch(() => ({}))).pendingPrompt || null;
+    if (saved) await chrome.storage.session.remove('pendingPrompt').catch(() => {});
+    return { pending: saved && Date.now() - saved.at < 120000 ? saved : null };
+  }
+  if (message.type === 'schedule-add') {
+    const list = await schedules();
+    const entry = Schedule.add(list, message.prompt, message.every, Date.now());
+    await saveSchedules([...list, entry]);
+    await ensureAlarm();
+    return { schedule: entry, count: list.length + 1 };
+  }
+  if (message.type === 'schedule-list') return { schedules: await schedules() };
+  if (message.type === 'schedule-remove') {
+    const list = (await schedules()).filter(item => item.id !== message.id);
+    await saveSchedules(list);
+    return { schedules: list };
+  }
+  if (message.type === 'schedule-done') {
+    const list = await schedules();
+    const found = list.find(item => item.id === message.id);
+    if (found) {
+      found.runs = (found.runs || 0) + 1;
+      found.lastRun = Date.now();
+      found.nextRun = Schedule.nextAt(Date.now(), found.every);
+      await saveSchedules(list);
+    }
+    return { done: !!found };
+  }
+  if (message.type === 'group-tab') { await groupTab(message.tabId); return { grouped: true }; }
   if (message.type === 'bridge') {
     await chrome.storage.local.set({ bridge: message.on === true });
     if (message.on === true) await ensureBridge();
@@ -1360,7 +1376,10 @@ async function handle(message) {
     if (message.stayPut === false || tab.discarded) { await chrome.tabs.update(tab.id, { active: true }); await sleep(250); }
     const fresh = await getTab(tab.id);
     if (!samePage(fresh.url, message.url)) fail('PAGE_CHANGED', 'That page changed. Observe it again.');
-    return actOnTab(fresh, action, message);
+    const result = await actOnTab(fresh, action, message);
+    // Tabs the agent navigates are gathered into one visible group, so a run never hides its work.
+    if (action.type === 'navigate') await groupTab(fresh.id);
+    return result;
   }
   throw new Error('Unknown action.');
 }

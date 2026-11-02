@@ -151,6 +151,33 @@ The command refuses, with a reason rather than a silent empty transcript, on a p
 
 Every line carries the media time its slice covered, read from the element's `currentTime` at both ends of the slice rather than counted from the capture. That is what keeps the highlight honest when the video is paused, seeked, or played at another speed: the lit line is the one covering the current time, a gap between lines keeps the previous one lit, and clicking a line seeks to it. The island carries play/pause, ±5 seconds, 0.5×–2× speed, and a fullscreen button, because a transcript you cannot rewind is not much use. It lives in a shadow root, so no page stylesheet can restyle or hide it, and the last transcript per tab is kept for the session, which is what `/script` shows when nothing is being transcribed. Its ⧉ button hands the same panel to a real Picture-in-Picture window (Chrome 116+), so it floats above other applications rather than over the page; closing that window, or pressing ⧉ again, puts it back in the tab with its lines and highlight intact. The button is hidden where the browser has no document Picture-in-Picture.
 
+## Schedules, menus, shortcuts, and notifications
+
+**Recurring runs.** `/every 60 check my inbox` schedules a task; `/schedules` lists them with their next
+run and how many times each has run, and `/schedules off <id>` (or `off all`) cancels. A `chrome.alarms`
+tick every minute checks what is due, books the next slot before starting — so a hanging run cannot make a
+task fire repeatedly — and opens the panel in a background tab with the task loaded. That tab runs exactly
+one task, posts a notification when it finishes, and closes itself. This is how a scheduled task works with
+the side panel shut: the tab is the driver, not the panel.
+
+**Entry points.** `Alt+Shift+M` opens the panel, `Alt+Shift+S` asks about the selection (or about the page
+when nothing is selected), `Alt+Shift+P` summarises the page. Right-clicking gives *Ask Mezze about this
+selection*, *Look at this page with Mezze*, and *Use this page in my Mezze task*. Whatever a menu item or
+shortcut produces is left in the composer rather than sent, so you can see it before it runs.
+
+**Notifications.** A run that ends while the panel is hidden posts a desktop notification with the first
+line of the result. Nothing is announced while you are watching, because you can already see it.
+
+**Tab groups.** Tabs the agent navigates are gathered into one green group called *Mezze*, so you can see
+the tabs a run has touched and close them in one move.
+
+**The cursor.** A rounded green dot with a soft halo follows the agent's clicks — no arrow, no tail, because
+an arrow implies a mouse you are holding. It glides to the target and ripples where the click lands, and
+never intercepts a click itself.
+
+**Languages.** The extension's name, description, menu items and toolbar title are translatable
+(`_locales/en`, `_locales/zh_CN`). The panel's own interface is still English.
+
 ## Commands, skills, and what follows them
 
 Typing works as well as picking from the list. A slash token resolves as you type — the chip shows the command it matched and what it does, a prefix is enough when it is unambiguous (`/tr` is `/transcribe`), and an unmatched token gets a dashed chip that says it will be sent as text.

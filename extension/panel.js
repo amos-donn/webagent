@@ -680,6 +680,7 @@ function stop() {
   // the task first, so this only fires for the others.
   const ended = running ? finishTask(running, 'stopped') : null;
   workflow = null; proposal = null; currentAction(null);
+  announceRunEnd();
   if (running) { running.paused = false; running.held = false; running.resume?.(); running.resume = null; }
   $('approval').hidden = true; $('stop').hidden = true; $('start').hidden = false; $('pause').hidden = true;
   $('goal').disabled = false; $('loading').hidden = true;
@@ -1343,6 +1344,73 @@ async function stopTranscribe() {
   send('player-idle', { tabId: run.tabId }).catch(() => {});
 }
 
+/* ---------- schedules: recurring runs, menus and shortcuts ---------- */
+// A schedule is stored by the background and fired by an alarm there. This side adds them, lists them,
+// and — when a scheduled tab opens with ?task=<id> — runs exactly one task and closes itself.
+
+async function addScheduleFromText(raw) {
+  const rest = String(raw).replace(/^\/every\s*/i, '').trim();
+  const match = rest.match(/^(\S+)\s+([\s\S]+)$/);
+  if (!match) throw new Error('Say it like /every 60 summarize my inbox, or /every 2h check prices.');
+  const out = await send('schedule-add', { every: match[1], prompt: match[2] });
+  const wait = Math.max(1, Math.round((out.schedule.nextRun - Date.now()) / 60000));
+  notify(`Scheduled: ${Schedule.describe(out.schedule)}. First run in ${wait} min.`);
+}
+
+async function showSchedules(raw = '/schedules') {
+  const arg = String(raw).replace(/^\/schedules\s*/i, '').trim();
+  const out = await send('schedule-list');
+  const list = Array.isArray(out.schedules) ? out.schedules : [];
+  if (/^off\b/i.test(arg)) {
+    const which = arg.replace(/^off\s*/i, '').trim();
+    if (!which || /^all$/i.test(which)) {
+      for (const entry of list) await send('schedule-remove', { id: entry.id });
+      notify(list.length ? `Removed ${list.length} scheduled task${list.length === 1 ? '' : 's'}.` : 'Nothing was scheduled.');
+      return;
+    }
+    const target = list.find(entry => entry.id === which) || list[Number(which) - 1];
+    if (!target) { notify('No scheduled task matches that.', true); return; }
+    await send('schedule-remove', { id: target.id });
+    notify(`Removed “${target.prompt.slice(0, 40)}”.`);
+    return;
+  }
+  if (!list.length) { notify('Nothing scheduled yet. Add one with /every 60 <task>.'); return; }
+  const lines = list.map((entry, index) => `${index + 1}. **${Schedule.describe(entry)}** — next in ${Math.max(0, Math.round((entry.nextRun - Date.now()) / 60000))} min, ${entry.runs || 0} run${(entry.runs || 0) === 1 ? '' : 's'} · id \`${entry.id}\``);
+  pushMessage('assistant', `Scheduled tasks:\n\n${lines.join('\n')}\n\nCancel one with \`/schedules off <id>\`.`);
+  notify(`${list.length} scheduled task${list.length === 1 ? '' : 's'}.`);
+}
+
+// Scheduled tabs are background tabs, and nobody is watching them: they announce themselves instead.
+function announceRunEnd() {
+  if (document.visibilityState === 'visible') return;
+  const last = [...(chat?.messages || [])].reverse().find(message => message.role === 'assistant');
+  const text = String(last?.text || '').replace(/\s+/g, ' ').trim();
+  chrome.runtime.sendMessage({ type: 'notify', title: 'Mezze finished this run', message: text.slice(0, 160) || 'Open Mezze to see what happened.' }).catch(() => {});
+}
+
+// `?task=<id>&auto=1` is one scheduled run in one tab: start it, wait for the end, say so, close.
+async function autorun() {
+  const id = new URLSearchParams(location.search).get('task');
+  if (!id) return false;
+  const out = await send('schedule-list').catch(() => ({ schedules: [] }));
+  const entry = (out.schedules || []).find(item => item.id === id);
+  if (!entry) { notify('That scheduled task is gone. Remove this tab.', true); return true; }
+  document.title = `Mezze — ${entry.prompt.slice(0, 28)}`;
+  notify(`Scheduled run: ${entry.prompt.slice(0, 80)}`);
+  await startWorkflow(entry.prompt).catch(error => notify(error.message || 'The scheduled run could not start.', true));
+  await send('schedule-done', { id }).catch(() => {});
+  let seen = false;
+  for (let tick = 0; tick < 900; tick += 1) {
+    await new Promise(done => setTimeout(done, 2000));
+    if (workflow || proposal) seen = true;
+    else if (seen) break;
+    else if (tick > 10) break;
+  }
+  await send('notify', { title: 'Mezze finished a scheduled task', message: entry.prompt.slice(0, 160) }).catch(() => {});
+  setTimeout(() => window.close(), 800);
+  return true;
+}
+
 /* ---------- the vault: memory, files, uploads ---------- */
 let lastTranscript = '';
 let vaultDir = 'memory';
@@ -1548,6 +1616,8 @@ const COMMANDS = [
   { cmd: '/script', hint: 'Show the floating transcript player on this page', run: () => openScript().catch(e => notify(e.message || 'Could not open script mode.', true)) },
   { cmd: '/files', hint: 'Open the local vault: memory, reports, uploads', run: () => openFiles().catch(e => notify(e.message || 'Could not open the vault.', true)) },
   { cmd: '/save', hint: 'Save the last transcript to the vault', run: () => saveTranscript().catch(e => notify(e.message || 'Could not save that transcript.', true)) },
+  { cmd: '/every', hint: 'Run a task on a schedule, like /every 60 check the inbox', run: () => notify('Type it in the box: /every 60 <task>.') },
+  { cmd: '/schedules', hint: 'List or cancel scheduled tasks', run: () => showSchedules().catch(() => {}) },
   { cmd: '/saw', hint: 'Show the screenshot behind the last step', run: () => openSaw() },
   { cmd: '/timings', hint: 'Open the speed panel', run: () => openTimings() },
   { cmd: '/stop', hint: 'Stop the running workflow', run: () => { stop(); notify('Workflow stopped.'); } }
@@ -2079,6 +2149,11 @@ function renderSuggest() {
   box.hidden = false;
 }
 $('composer').addEventListener('submit', async event => {
+  const typed = $('goal').value.trim();
+  // Scheduling is handled before resolution: /every carries its own argument, so letting it fall
+  // through would run the interval as a goal.
+  if (/^\/every\b/i.test(typed)) { event.preventDefault(); $('goal').value = ''; grow(); renderChips(); addScheduleFromText(typed).catch(error => notify(error.message || 'Could not schedule that.', true)); return; }
+  if (/^\/schedules\b/i.test(typed)) { event.preventDefault(); $('goal').value = ''; grow(); renderChips(); showSchedules(typed).catch(() => {}); return; }
   event.preventDefault();
   if (workflow || macroRun) return;
   if (rec) { notify('Save or cancel the recording first.', true); return; }
@@ -2161,7 +2236,7 @@ $('pause').addEventListener('click', () => {
 document.addEventListener('visibilitychange', () => { if (document.hidden && chat) persist().catch(() => {}); });
 $('worker').addEventListener('change', async () => { await chrome.storage.local.set({ worker: $('worker').value.trim().replace(/\/$/, '') }); });
 $('bridge-toggle').addEventListener('change', async () => { try { const out = await send('bridge', { on: $('bridge-toggle').checked }); notify(out.connected ? 'Bridge on. Start node bridge/server.mjs to accept MCP clients.' : 'Bridge off.'); } catch (e) { notify(e.message || 'Could not toggle the bridge.', true); } });
-$('pointer-toggle').addEventListener('change', async () => { await chrome.storage.local.set({ pointer: $('pointer-toggle').checked }); notify($('pointer-toggle').checked ? 'Pointer on: a purple cursor shows where the agent clicks.' : 'Pointer off.'); });
+$('pointer-toggle').addEventListener('change', async () => { await chrome.storage.local.set({ pointer: $('pointer-toggle').checked }); notify($('pointer-toggle').checked ? 'Pointer on: a green dot shows where the agent clicks.' : 'Pointer off.'); });
 $('speed').addEventListener('change', async () => {
   const value = $('speed').value;
   speed = Object.prototype.hasOwnProperty.call(PACING, value) ? value : 'fast';
@@ -2251,4 +2326,13 @@ chrome.runtime.onMessage.addListener((message, sender) => {
   scriptCache = (await chrome.storage.session.get(SCRIPT_KEY).catch(() => ({})))[SCRIPT_KEY] || {};
   renderMacros();
   listTabs().catch(() => { $('tabs-label').textContent = 'Could not list tabs.'; });
+  // A request left by the context menu or a keyboard shortcut waits in session storage.
+  const { pending } = await send('pending').catch(() => ({ pending: null }));
+  if (pending?.prompt) {
+    $('goal').value = pending.prompt;
+    grow();
+    renderChips();
+    notify(pending.site ? 'A request from the page menu is in the box — press send.' : 'A shortcut request is in the box — press send.');
+  }
+  await autorun();
 })();

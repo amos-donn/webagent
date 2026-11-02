@@ -1,0 +1,20 @@
+{
+  "extName": {
+    "message": "Mezze — 浏览器代理"
+  },
+  "extDesc": {
+    "message": "用于多步浏览器工作流的侧边栏代理。"
+  },
+  "actionTitle": {
+    "message": "打开 Mezze"
+  },
+  "menuSelection": {
+    "message": "让 Mezze 解释选中的内容"
+  },
+  "menuPage": {
+    "message": "让 Mezze 查看这个页面"
+  },
+  "menuTask": {
+    "message": "把这个页面加入当前任务"
+  }
+}

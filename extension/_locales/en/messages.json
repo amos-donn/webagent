@@ -1,0 +1,20 @@
+{
+  "extName": {
+    "message": "Mezze — Browser Agent"
+  },
+  "extDesc": {
+    "message": "A side-panel agent for multi-step browser workflows."
+  },
+  "actionTitle": {
+    "message": "Open Mezze"
+  },
+  "menuSelection": {
+    "message": "Ask Mezze about this selection"
+  },
+  "menuPage": {
+    "message": "Look at this page with Mezze"
+  },
+  "menuTask": {
+    "message": "Use this page in my Mezze task"
+  }
+}
