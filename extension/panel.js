@@ -1176,6 +1176,37 @@ function renderTranscribe() {
   loading(`Transcribing ${heard}`, 'book-open-text');
 }
 
+// Script mode keeps the last transcript per tab, so the island can come back after the panel has been
+// closed or reloaded and /script is useful even when nothing is being transcribed.
+const SCRIPT_KEY = 'script:lines';
+let scriptCache = {};
+let scriptTab = null;
+const scriptFor = tabId => scriptCache[tabId] || null;
+
+async function saveScript(tabId, data) {
+  if (!tabId) return;
+  scriptCache = { ...scriptCache, [tabId]: { title: data.title || '', url: data.url || '', lines: (data.lines || []).slice(-400) } };
+  await chrome.storage.session.set({ [SCRIPT_KEY]: scriptCache }).catch(() => {});
+}
+
+async function openScript() {
+  await listTabs().catch(() => {});
+  const tab = tabCache.find(item => item.id === actingTabId) || tabCache.find(item => item.active) || tabCache[0];
+  if (!tab?.id) throw new Error('Open the page with the video first.');
+  if (scriptTab === tab.id) {
+    await send('player-close', { tabId: tab.id }).catch(() => {});
+    scriptTab = null;
+    notify('Script mode closed.');
+    return;
+  }
+  const saved = scriptFor(tab.id);
+  await send('player-open', { tabId: tab.id, title: saved?.title || tab.title || '', lines: saved?.lines || [] });
+  scriptTab = tab.id;
+  notify(saved?.lines?.length
+    ? 'Script mode is on — the transcript follows the video.'
+    : 'Script mode is on. Start /transcribe and the lines appear as they are transcribed.');
+}
+
 // The same capture serves the /transcribe command and the agent's transcribe action, so it reports a
 // result instead of delivering one: the caller decides whether that is a chat message or a step.
 async function transcribePage(url = null, mode = 'command', forced = null) {
@@ -1193,7 +1224,7 @@ async function transcribePage(url = null, mode = 'command', forced = null) {
     renderTabs();
   }
   const session = crypto.randomUUID();
-  const run = { session, tabId: tab.id, mode, text: [], queue: [], parts: 0, seconds: 0, duration: 0, done: false, finished: false, busy: false, settle: null, error: '' };
+  const run = { session, tabId: tab.id, mode, text: [], lines: [], title: '', url: '', queue: [], parts: 0, seconds: 0, duration: 0, done: false, finished: false, busy: false, settle: null, error: '' };
   const settled = new Promise(resolve => { run.settle = resolve; });
   transcribeRun = run;
   let out;
@@ -1204,6 +1235,11 @@ async function transcribePage(url = null, mode = 'command', forced = null) {
     throw new Error(out?.error || 'No video or audio was found on this page.');
   }
   run.duration = Number(out.duration) || 0;
+  run.title = String(out.title || tab.title || '');
+  run.url = String(out.url || tab.url || '');
+  // Script mode opens with the capture: watching the lines arrive is the point of it.
+  scriptTab = tab.id;
+  await send('player-open', { tabId: tab.id, title: run.title, lines: run.lines }).catch(() => {});
   if (mode === 'command') transcribeUi(true);
   currentAction('Recording the audio from this page');
   renderTranscribe();
@@ -1236,7 +1272,7 @@ async function onTranscribeEvent(event) {
   if (event.event === 'progress') { run.seconds = Number(event.seconds) || run.seconds; renderTranscribe(); return; }
   if (event.event === 'chunk') {
     run.seconds = Number(event.seconds) || run.seconds;
-    run.queue.push({ part: Number(event.part) || run.parts + 1, audio: event.audio, mimeType: event.mimeType, seconds: run.seconds });
+    run.queue.push({ part: Number(event.part) || run.parts + 1, audio: event.audio, mimeType: event.mimeType, seconds: run.seconds, from: Number(event.from), to: Number(event.to) });
     pumpTranscribe();
     return;
   }
@@ -1256,7 +1292,19 @@ async function pumpTranscribe() {
       run.parts = Math.max(run.parts, job.part);
       currentAction(`Transcribing ${MezzeAudio.stamp(job.seconds)}`);
       const out = await api('/transcribe', { audio: job.audio, mimeType: job.mimeType, part: job.part, seconds: job.seconds });
-      if (out?.text) run.text = [...run.text, out.text];
+      if (out?.text) {
+        run.text = [...run.text, out.text];
+        // The slice knows the media time it covers, which is what lets the island light the right line
+        // while the video is still playing instead of only at the end.
+        const line = {
+          from: Number.isFinite(job.from) ? job.from : (job.part - 1) * MezzeAudio.SLICE,
+          to: Number.isFinite(job.to) ? job.to : job.part * MezzeAudio.SLICE,
+          text: out.text
+        };
+        run.lines.push(line);
+        saveScript(run.tabId, { title: run.title, url: run.url, lines: run.lines });
+        send('player-line', { tabId: run.tabId, line, title: run.title }).catch(() => {});
+      }
       renderTranscribe();
     }
   } catch (e) {
@@ -1304,6 +1352,7 @@ const COMMANDS = [
   { cmd: '/record', hint: 'Record a macro in this tab', run: () => { openMacros(); startRecording().catch(e => notify(e.message || 'Could not start recording.', true)); } },
   { cmd: '/macros', hint: 'Open recorded macros', run: () => openMacros() },
   { cmd: '/transcribe', hint: 'Transcribe the audio of the video on this page', run: () => transcribeCommand().catch(e => notify(e.message || 'Could not transcribe this page.', true)) },
+  { cmd: '/script', hint: 'Show the floating transcript player on this page', run: () => openScript().catch(e => notify(e.message || 'Could not open script mode.', true)) },
   { cmd: '/saw', hint: 'Show the screenshot behind the last step', run: () => openSaw() },
   { cmd: '/timings', hint: 'Open the speed panel', run: () => openTimings() },
   { cmd: '/stop', hint: 'Stop the running workflow', run: () => { stop(); notify('Workflow stopped.'); } }
@@ -1861,6 +1910,7 @@ $('timings-clear').addEventListener('click', () => {
   notify('Timings cleared.');
 });
 chrome.runtime.onMessage.addListener((message, sender) => {
+  if (message?.type === 'player-closed' && scriptTab && sender?.tab?.id === scriptTab) scriptTab = null;
   if (sender?.id && sender.id !== chrome.runtime.id) return;
   if (message?.type === 'pointerBlocked') { notify('Pointer is on, but this page blocks the cursor overlay — the click still went ahead.', true); return; }
   // The session is on the envelope: it belongs to the recording, not to the action it describes.
@@ -1900,6 +1950,7 @@ chrome.runtime.onMessage.addListener((message, sender) => {
   renderChat(); renderPlan();
   if (chat.messages?.length) notify('Restored your last chat. Send a message to keep going, or start a new one.');
   await resumeRecording();
+  scriptCache = (await chrome.storage.session.get(SCRIPT_KEY).catch(() => ({})))[SCRIPT_KEY] || {};
   renderMacros();
   listTabs().catch(() => { $('tabs-label').textContent = 'Could not list tabs.'; });
 })();

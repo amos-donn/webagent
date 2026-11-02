@@ -128,6 +128,12 @@ That is also its cost, and it is worth being plain about. Transcription takes **
 
 The command refuses, with a reason rather than a silent empty transcript, on a protected (DRM) video, a page with no media, a player that exposes no audio track, and a `chrome://` page. Speech is transcribed verbatim in whatever language it is spoken, `[unclear]` marks a word the model could not resolve, and a slice with no speech is not sent at all.
 
+## Script mode: the transcript, in sync, floating over the page
+
+`/script` opens a transcript island on the page — draggable, resizable, in the page rather than in the panel. Transcription opens it by itself, and lines appear as each ten-second slice comes back, so the text is readable while the video is still playing.
+
+Every line carries the media time its slice covered, read from the element's `currentTime` at both ends of the slice rather than counted from the capture. That is what keeps the highlight honest when the video is paused, seeked, or played at another speed: the lit line is the one covering the current time, a gap between lines keeps the previous one lit, and clicking a line seeks to it. The island carries play/pause, ±5 seconds, 0.5×–2× speed, and a fullscreen button, because a transcript you cannot rewind is not much use. It lives in a shadow root, so no page stylesheet can restyle or hide it, and the last transcript per tab is kept for the session, which is what `/script` shows when nothing is being transcribed.
+
 ## What a round costs
 
 The hourglass button in the topbar (and `/timings`) opens the speed panel: how long whole tasks take, then what the last 60 rounds actually spent, as medians with a stacked bar and the last rounds listed, exportable as `mezze-timings.json`.

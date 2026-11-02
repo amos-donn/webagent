@@ -882,13 +882,18 @@ async function captureMediaAudio(session) {
   const mute = context.createGain();
   mute.gain.value = 0;
   const chunk = new Float32Array(audio.RATE * audio.SLICE);
-  let filled = 0, part = 0, samples = 0, stopped = false;
+  let filled = 0, part = 0, samples = 0, stopped = false, from = 0;
   const duration = Number(media.duration) || 0;
   const flush = () => {
     if (!filled) return;
     part += 1;
     const bytes = audio.wavBytes(chunk.subarray(0, filled), audio.RATE);
-    send({ event: 'chunk', part, audio: audio.base64(bytes), mimeType: 'audio/wav', seconds: Math.round(samples / audio.RATE) });
+    // The slice carries the media time it covers, taken from the element itself: a count of captured
+    // seconds drifts the moment the video is paused, seeked or played at another speed.
+    send({
+      event: 'chunk', part, audio: audio.base64(bytes), mimeType: 'audio/wav', seconds: Math.round(samples / audio.RATE),
+      from: Math.round(from * 100) / 100, to: Math.round((Number(media.currentTime) || 0) * 100) / 100
+    });
     filled = 0;
   };
   const onAudio = event => {
@@ -896,6 +901,7 @@ async function captureMediaAudio(session) {
     // A paused video produces silence, and silence is a wasted request: nothing is collected until it
     // plays again.
     if (media.paused || media.ended) return;
+    if (!filled) from = Number(media.currentTime) || 0;
     const input = event.inputBuffer.getChannelData(0);
     for (let i = 0; i < input.length; i++) {
       chunk[filled++] = input[i];
@@ -928,6 +934,23 @@ function stopCapture(session) {
   const capture = window.__mezzeCapture;
   if (capture && (!session || capture.session === session)) capture.stop();
   return true;
+}
+// The island is its own injected file; these three thin functions are what the panel talks to, so the
+// service worker never holds transcript state and a page reload only loses its own island.
+function openPlayer(input) {
+  if (!window.MezzeScript) return { open: false };
+  window.MezzeScript.open(input || {});
+  return { open: true };
+}
+function appendPlayerLine(line) {
+  if (!window.MezzeScript) return { open: false };
+  window.MezzeScript.line(line || {});
+  return { open: true };
+}
+function closePlayer() {
+  if (!window.MezzeScript) return { open: false };
+  window.MezzeScript.close();
+  return { open: true };
 }
 // The session lives in session storage rather than a global, so it survives a service worker restart
 // and every navigation re-arms the recorder on the new document.
@@ -1226,11 +1249,33 @@ async function handle(message) {
     await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: stopCapture, args: [String(message.session || '')] }).catch(() => {});
     return { stopped: true };
   }
+  if (message.type === 'player-open') {
+    const tab = await getTab(message.tabId);
+    if (!permitted(tab.url)) throw new Error('Script mode needs an HTTPS page (or a local development page). Chrome internal pages are blocked.');
+    await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['audio.js', 'player.js'] });
+    const [result] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: openPlayer, args: [{ title: String(message.title || ''), lines: Array.isArray(message.lines) ? message.lines.slice(-400) : [] }] });
+    return result?.result || { open: false };
+  }
+  if (message.type === 'player-line') {
+    const tab = await getTab(message.tabId);
+    const line = message.line && typeof message.line === 'object' ? message.line : {};
+    const [first] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: appendPlayerLine, args: [line] }).catch(() => []);
+    if (first?.result?.open) return { open: true };
+    // The page navigated, or the panel reopened: put the island back and seed it with this line.
+    await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['audio.js', 'player.js'] }).catch(() => {});
+    const [second] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: openPlayer, args: [{ title: String(message.title || ''), lines: [line] }] }).catch(() => []);
+    return { open: !!second?.result?.open };
+  }
+  if (message.type === 'player-close') {
+    await chrome.scripting.executeScript({ target: { tabId: message.tabId }, func: closePlayer }).catch(() => {});
+    return { closed: true };
+  }
   // The panel receives these directly from the page; answering here only stops the content script
   // from seeing "Unknown action" as a rejection.
   if (message.type === 'macro-event') return { ok: true };
   // The audio slices travel from the page to the panel, which owns the Worker call and the transcript.
   if (message.type === 'transcribe-event') return { ok: true };
+  if (message.type === 'player-closed') return { ok: true };
   if (message.type === 'tabs') {
     // Every window, not just this one: the page you reference with @ is often in another window.
     const tabs = await chrome.tabs.query({});

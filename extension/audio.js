@@ -68,11 +68,30 @@
   }
 
   // A live stream reports an infinite duration, and "Infinity:NaN" is a worse label than "0:00".
+  // The line being spoken at a given video time. A gap between lines — a pause, a seek, a slice the
+  // model returned nothing for — keeps the previous line lit rather than blanking the panel, and a time
+  // before the first line lights nothing.
+  function activeIndex(lines, time) {
+    if (!Array.isArray(lines) || !lines.length) return -1;
+    const at = Number(time) || 0;
+    let found = -1;
+    for (let i = 0; i < lines.length; i++) {
+      const from = Number(lines[i]?.from) || 0;
+      const to = Number(lines[i]?.to);
+      if (Number.isFinite(to) && at >= from && at < to) return i;
+      if (at >= from) found = i;
+    }
+    return found;
+  }
+
+  // 1x is not the only speed a person reads at, so the island offers the usual set.
+  const RATES = [0.5, 0.75, 1, 1.25, 1.5, 2];
+
   const stamp = seconds => {
     const value = Number(seconds);
     const total = Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0;
     return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`;
   };
 
-  return { RATE, SLICE, toInt16, wavBytes, base64, joinParts, stamp };
+  return { RATE, SLICE, RATES, toInt16, wavBytes, base64, joinParts, stamp, activeIndex };
 });

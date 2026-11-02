@@ -44,6 +44,20 @@ test('slices are joined into readable prose without empty paragraphs', () => {
   assert.equal(Audio.joinParts(['  ', '\n']), '', 'a silent slice leaves no gap behind');
 });
 
+test('the line for a video time is the one covering it, or the last one before it', () => {
+  const lines = [{ from: 0, to: 10 }, { from: 10, to: 20 }, { from: 32, to: 42 }];
+  assert.equal(Audio.activeIndex(lines, 0), 0);
+  assert.equal(Audio.activeIndex(lines, 9.9), 0);
+  assert.equal(Audio.activeIndex(lines, 10), 1);
+  assert.equal(Audio.activeIndex(lines, 25), 1, 'a gap keeps the previous line lit');
+  assert.equal(Audio.activeIndex(lines, 40), 2);
+  assert.equal(Audio.activeIndex(lines, 90), 2, 'past the end is the last line, not nothing');
+  assert.equal(Audio.activeIndex(lines, -5), -1, 'before the first line nothing is lit');
+  assert.equal(Audio.activeIndex([], 5), -1);
+  assert.equal(Audio.activeIndex(null, 5), -1);
+  assert.deepEqual(Audio.RATES, [0.5, 0.75, 1, 1.25, 1.5, 2]);
+});
+
 test('a timestamp is minutes and seconds, not a float', () => {
   assert.equal(Audio.stamp(0), '0:00');
   assert.equal(Audio.stamp(65), '1:05');
