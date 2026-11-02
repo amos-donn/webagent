@@ -40,11 +40,14 @@
   .empty { padding: 16px 12px; opacity: .6; font-size: 12px; }
   #island:fullscreen { inset: 0; width: auto; height: auto; min-width: 0; min-height: 0; border-radius: 0; resize: none; }
   #island:fullscreen .line { font-size: 15px; padding: 8px 12px; }
+  #island[pip] { position: static; inset: auto; width: 100%; height: 100%; min-width: 0; min-height: 0; border: 0; border-radius: 0; box-shadow: none; resize: none; }
+  #island[pip] .grip { display: none; }
+  #island[pip] header { cursor: default; }
   `;
 
   const audio = () => window.MezzeAudio || null;
   const stamp = seconds => (audio()?.stamp ? audio().stamp(seconds) : `${Math.floor((Number(seconds) || 0) / 60)}:${String(Math.round((Number(seconds) || 0) % 60)).padStart(2, '0')}`);
-  const state = { host: null, root: null, island: null, body: null, media: null, lines: [], title: '', idx: -1, raf: 0, scrolled: 0, rate: 1 };
+  const state = { host: null, root: null, island: null, body: null, media: null, lines: [], title: '', idx: -1, raf: 0, scrolled: 0, rate: 1, pip: null };
 
   // The same rule the capture uses: the page's largest media element with a real source.
   function mediaElement() {
@@ -73,6 +76,7 @@
       <span class="time">0:00</span>
       <button class="play" type="button" aria-label="Play or pause">❚❚</button>
       <button class="full" type="button" aria-label="Fullscreen" title="Fullscreen">⛶</button>
+      <button class="pip" type="button" aria-label="Picture-in-picture" title="Picture-in-picture">⧉</button>
       <button class="close" type="button" aria-label="Close the transcript" title="Close">✕</button>
     </header>
     <div class="lines" role="list"></div>
@@ -115,6 +119,9 @@
       destroy();
       try { chrome.runtime.sendMessage({ type: 'player-closed' }); } catch { /* panel closed */ }
     });
+    const pipButton = island.querySelector('.pip');
+    if (!('documentPictureInPicture' in window)) pipButton.hidden = true;
+    else pipButton.addEventListener('click', () => { togglePip().catch(() => {}); });
     island.querySelector('.back').addEventListener('click', () => seekBy(-5));
     island.querySelector('.fwd').addEventListener('click', () => seekBy(5));
     state.body.addEventListener('click', event => {
@@ -150,7 +157,7 @@
     });
 
     island.addEventListener('keydown', event => {
-      if (event.key === 'Escape' && island !== document.fullscreenElement) destroy();
+      if (event.key === 'Escape' && island !== document.fullscreenElement && !state.pip) destroy();
     });
   }
 
@@ -240,6 +247,37 @@
   }
   function kick() { if (!state.raf) state.raf = requestAnimationFrame(tick); }
 
+  // A real Picture-in-Picture window floats above other applications, not just over this page. Chrome
+  // hands a document one such window and only from a user gesture, which is why this is a button in the
+  // island rather than something the panel can trigger.
+  async function togglePip() {
+    if (!('documentPictureInPicture' in window) || !state.island) return false;
+    if (state.pip) { state.pip.close(); return true; }
+    const pip = await window.documentPictureInPicture.requestWindow({ width: 420, height: 380 });
+    state.pip = pip;
+    try { const sheet = new CSSStyleSheet(); sheet.replaceSync(CSS); pip.document.adoptedStyleSheets = [sheet]; }
+    catch { const style = pip.document.createElement('style'); style.textContent = CSS; pip.document.head.append(style); }
+    const base = pip.document.createElement('style');
+    base.textContent = 'html,body{margin:0;height:100%;background:transparent}';
+    pip.document.head.append(base);
+    pip.document.title = state.title || 'Transcript';
+    pip.addEventListener('pagehide', restoreFromPip);
+    state.island.setAttribute('pip', '');
+    state.host.style.height = '100%';
+    pip.document.body.append(state.host);
+    return true;
+  }
+
+  // The window is closed by the person, by the browser or by destroy(), and in every case the same DOM
+  // goes back to the page: the island keeps its lines, its highlight and its media bindings.
+  function restoreFromPip() {
+    const pip = state.pip;
+    state.pip = null;
+    state.island?.removeAttribute('pip');
+    if (state.host) { state.host.style.height = ''; document.documentElement.append(state.host); }
+    try { pip?.close(); } catch { /* already gone */ }
+  }
+
   function open(input = {}) {
     const incoming = Array.isArray(input.lines) ? input.lines : [];
     state.lines = incoming
@@ -270,6 +308,7 @@
   }
 
   function destroy() {
+    if (state.pip) { try { state.pip.removeEventListener?.('pagehide', restoreFromPip); state.pip.close(); } catch { /* already gone */ } state.pip = null; }
     unbind();
     if (state.raf) cancelAnimationFrame(state.raf);
     state.raf = 0;
@@ -281,5 +320,5 @@
     state.idx = -1;
   }
 
-  window.MezzeScript = { open, line, close: destroy, lines: () => state.lines.slice(), state };
+  window.MezzeScript = { open, line, close: destroy, pip: togglePip, lines: () => state.lines.slice(), state };
 })();
