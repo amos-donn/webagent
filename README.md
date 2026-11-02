@@ -94,7 +94,7 @@ The setting applies from the next action; a run already in flight keeps the spee
 
 ## What a round costs
 
-`/timings` prints what the last 60 rounds actually spent, and exports every record as `mezze-timings.json`:
+The hourglass button in the topbar (and `/timings`) opens the speed panel: what the last 60 rounds actually spent, as medians with a stacked bar and the last eight rounds listed, exportable as `mezze-timings.json`. Each decision also prints a faint line in the timeline under the steps it paid for — `1.24s · read 380ms · model 700ms · act 160ms` — and every step card carries its own duration. What is measured:
 
 - **read** — the observation round trip, including a second read when a screenshot had to be taken
 - **model** — the Worker's own timing of the Gemini call, including its internal correction retry

@@ -60,10 +60,11 @@ function logTiming(record) {
 // when the next round starts, when the run ends, or when the final check takes over.
 function flushTiming(run) {
   const record = run?.timing;
-  if (!record) return;
+  if (!record) return null;
   run.timing = null;
   record.total = [record.observeMs, record.modelMs, record.netMs, record.actionMs].reduce((sum, value) => sum + (Number(value) || 0), 0);
   logTiming(record);
+  return record;
 }
 function noteActionMs(run, started, type) {
   const record = run?.timing;
@@ -74,27 +75,93 @@ function noteActionMs(run, started, type) {
 }
 const median = values => { const list = values.filter(value => Number.isFinite(value)).sort((a, b) => a - b); if (!list.length) return 0; const mid = Math.floor(list.length / 2); return list.length % 2 ? list[mid] : Math.round((list[mid - 1] + list[mid]) / 2); };
 const p90 = values => { const list = values.filter(value => Number.isFinite(value)).sort((a, b) => a - b); return list.length ? list[Math.min(list.length - 1, Math.ceil(list.length * 0.9) - 1)] : 0; };
-function timingSummary() {
+const elapsedLabel = ms => { const value = Number(ms) || 0; return value >= 1000 ? `${(value / 1000).toFixed(2)}s` : `${Math.max(1, Math.round(value))}ms`; };
+// One faint line per decision, under the steps it paid for: the whole point of logging is that the
+// wait is attributable without opening anything.
+function roundLine(record) {
+  if (!record) return '';
+  const parts = [elapsedLabel(record.total)];
+  if (Number.isFinite(record.observeMs)) parts.push(`read ${elapsedLabel(record.observeMs)}`);
+  if (record.modelMs) parts.push(`model ${elapsedLabel(record.modelMs)}`);
+  if (record.actionMs) parts.push(`act ${elapsedLabel(record.actionMs)}`);
+  return parts.join(' · ');
+}
+function showRoundTiming(run) {
+  const record = run?.timing;
+  if (!record || record.shown) return;
+  record.shown = true;
+  record.total = [record.observeMs, record.modelMs, record.netMs, record.actionMs].reduce((sum, value) => sum + (Number(value) || 0), 0);
+  pushMessage('timing', roundLine(record));
+}
+function timingStats(list) {
+  const values = key => list.map(record => Number(record[key]) || 0);
+  const read = median(list.map(record => Number.isFinite(record.observeMs) ? record.observeMs : 0));
+  const model = median(values('modelMs'));
+  const net = median(values('netMs'));
+  const act = median(values('actionMs'));
+  const measured = read + model + net + act || 1;
+  return {
+    read, model, net, act,
+    total: median(values('total')), slow: p90(values('total')),
+    share: Math.round(model / measured * 100),
+    shots: list.filter(record => record.image).length,
+    bytes: list.reduce((sum, record) => sum + (record.bytes || 0), 0) / list.length,
+    tokensIn: list.reduce((sum, record) => sum + (record.tokens?.in || 0), 0),
+    tokensOut: list.reduce((sum, record) => sum + (record.tokens?.out || 0), 0)
+  };
+}
+function renderTimings() {
+  const body = $('timings-body');
+  if (!body) return;
+  body.textContent = '';
   const list = timings.slice(-60);
-  if (!list.length) return ['No rounds logged yet. Run a task, then /timings.'];
-  const secs = value => `${(value / 1000).toFixed(2)}s`;
-  const shots = list.filter(record => record.image).length;
-  const bytes = Math.round(list.reduce((sum, record) => sum + (record.bytes || 0), 0) / list.length);
-  const tokensIn = list.reduce((sum, record) => sum + (record.tokens?.in || 0), 0);
-  const tokensOut = list.reduce((sum, record) => sum + (record.tokens?.out || 0), 0);
-  const modelMs = median(list.map(record => record.modelMs || 0));
-  const totalMs = median(list.map(record => record.total || 0));
-  return [
-    `${list.length} round${list.length === 1 ? '' : 's'} logged · median ${secs(totalMs)} · p90 ${secs(p90(list.map(record => record.total || 0)))}`,
-    `Median split: read ${secs(median(list.map(record => record.observeMs || 0)))} · model ${secs(modelMs)} · network ${secs(median(list.map(record => record.netMs || 0)))} · act ${secs(median(list.map(record => record.actionMs || 0)))}`,
-    `Model is ${totalMs ? Math.round(modelMs / totalMs * 100) : 0}% of the round · ${shots}/${list.length} rounds used a screenshot · ${Math.round(bytes / 1024)} KB average payload · ${(tokensIn / 1000).toFixed(1)}k in / ${(tokensOut / 1000).toFixed(1)}k out tokens`
-  ];
+  if (!list.length) {
+    const p = document.createElement('p'); p.className = 'timings-empty';
+    p.textContent = 'No rounds logged yet. Run a task and this fills in.';
+    body.append(p); return;
+  }
+  const stats = timingStats(list);
+  const row = (label, value) => {
+    const div = document.createElement('div'); div.className = 'timing-stat';
+    const a = document.createElement('span'); a.textContent = label;
+    const b = document.createElement('span'); b.textContent = value;
+    div.append(a, b); return div;
+  };
+  body.append(row(`Median round · ${list.length} logged`, elapsedLabel(stats.total)));
+  body.append(row('90% finish under', elapsedLabel(stats.slow)));
+  body.append(row('Model · share of the round', `${elapsedLabel(stats.model)} · ${stats.share}%`));
+  body.append(row('Screenshots', `${stats.shots} of ${list.length} rounds`));
+  body.append(row('Payload · tokens', `${Math.round(stats.bytes / 1024)} KB · ${(stats.tokensIn / 1000).toFixed(1)}k in / ${(stats.tokensOut / 1000).toFixed(1)}k out`));
+  const bar = document.createElement('div'); bar.className = 'timing-bar';
+  const sum = stats.read + stats.model + stats.net + stats.act || 1;
+  for (const [value, color, name] of [[stats.read, 'var(--accent)', 'read'], [stats.model, 'var(--ink)', 'model'], [stats.net, 'var(--faint)', 'network'], [stats.act, 'var(--line-strong)', 'act']]) {
+    const seg = document.createElement('i');
+    seg.style.width = `${value / sum * 100}%`; seg.style.background = color; seg.title = `${name} ${elapsedLabel(value)}`;
+    bar.append(seg);
+  }
+  body.append(bar);
+  const legend = document.createElement('div'); legend.className = 'timing-legend';
+  for (const [color, name] of [['var(--accent)', 'read'], ['var(--ink)', 'model'], ['var(--faint)', 'network'], ['var(--line-strong)', 'act']]) {
+    const item = document.createElement('b');
+    const dot = document.createElement('em'); dot.style.background = color;
+    item.append(dot, document.createTextNode(name)); legend.append(item);
+  }
+  body.append(legend);
+  const rounds = document.createElement('div'); rounds.className = 'round-list';
+  for (const record of list.slice(-8).reverse()) {
+    const item = document.createElement('div'); item.className = 'round-row';
+    const total = document.createElement('b'); total.textContent = elapsedLabel(record.total);
+    const parts = [];
+    parts.push(Number.isFinite(record.observeMs) ? `read ${elapsedLabel(record.observeMs)}` : 'read n/a');
+    parts.push(`model ${elapsedLabel(record.modelMs || 0)}`);
+    parts.push(`act ${elapsedLabel(record.actionMs || 0)}`);
+    if (record.image) parts.push('shot');
+    const meta = document.createElement('span'); meta.textContent = parts.join(' · ');
+    item.append(total, meta); rounds.append(item);
+  }
+  body.append(rounds);
 }
-function showTimings() {
-  for (const line of timingSummary()) pushMessage('note', line);
-  if (timings.length) download('mezze-timings.json', JSON.stringify(timings, null, 2));
-  notify(timings.length ? 'Timings written to the chat and exported as JSON.' : 'No rounds logged yet.', !timings.length);
-}
+function openTimings() { renderTimings(); if (!$('timings-dialog').open) $('timings-dialog').showModal(); }
 
 function notify(text, error = false) { $('notice').textContent = text; $('notice').classList.toggle('error', error); $('notice').hidden = false; }
 function baseUrl() { const url = new URL($('worker').value.trim()); if (url.username || url.password || url.search || url.hash || (url.protocol !== 'https:' && !(url.protocol === 'http:' && ['localhost','127.0.0.1'].includes(url.hostname)))) throw new Error('Use an HTTPS Worker URL or localhost.'); return url.origin + url.pathname.replace(/\/$/, ''); }
@@ -199,7 +266,7 @@ function reportCard(report) {
 // Before a run reports success it looks at the page again and has the model check its own work; a
 // failed check feeds back as a correction instead of ending the run, and the user always gets a report.
 async function finalCheck(run, claim, incomplete = []) {
-  flushTiming(run);
+  const closing = flushTiming(run);
   if (workflow !== run) return;
   loading('Checking the result', 'check');
   $('loading-label').textContent = 'Checking the result against the page';
@@ -231,6 +298,7 @@ async function finalCheck(run, claim, incomplete = []) {
     await next(run, shot || undefined);
     return;
   }
+  if (closing) pushMessage('timing', roundLine(closing));
   pushMessage('report', reportText(report), { report });
   renderPlan();
   stop();
@@ -707,6 +775,7 @@ async function runBatch(run) {
     if (run.queue.length) { loading('Next queued action', '◌'); await sleep(Math.round(pace() / 2)); }
   }
   if (workflow !== run) return;
+  showRoundTiming(run);
   loading('Waiting for the page', '◌');
   await sleep(pace());
   if (workflow !== run) return;
@@ -831,7 +900,7 @@ async function executeOne(run, current) {
     if (isRateLimit(error.status, error.message) && cooldowns < COOLDOWN_LIMIT) { await cooldown(); return 'recover'; }
     if (error.code === 'PAGE_CHANGED' && (run.recovered || 0) < 2) { run.recovered = (run.recovered || 0) + 1; notify('The page shifted while acting. Re-reading it and trying again.'); return 'recover'; }
     run.steps.push({ type: action.type, description: action.description || '', ok: false, changed: false, code: error.code || 'ERROR', note: error.message, page: current.url, ref: action.ref, x: current.action.x, y: current.action.y, url: action.url, direction: action.direction, text: action.type === 'type' ? action.text : undefined });
-    recordActivity(action, current.url, {}, 0, `${error.message}${error.code ? ` [${error.code}]` : ''}`);
+    recordActivity(action, current.url, {}, Math.round(performance.now() - actionStart), `${error.message}${error.code ? ` [${error.code}]` : ''}`);
     currentAction(null);
     const label = `${error.message}${error.code ? ` (${error.code})` : ''}`;
     // A failed step is feedback for the model, not the end of the run.
@@ -853,7 +922,7 @@ async function executeOne(run, current) {
   else run.stalled = (run.stalled || 0) + 1;
   const note = ['read', 'gather'].includes(action.type) && result?.text ? `page excerpt: ${String(result.text).slice(0, 1500)}` : '';
   run.steps.push({ type: action.type, description: action.description || '', ok: true, changed, page: current.url, note, code: result?.code || '', ref: action.ref, x: current.action.x, y: current.action.y, url: action.url, direction: action.direction, text: action.type === 'type' ? action.text : undefined });
-  recordActivity(action, result?.url || current.url, result, 0, null, { changed, fallback: !!result?.fallback, opened: action.type === 'open' ? { url: result?.url, title: result?.title } : undefined });
+  recordActivity(action, result?.url || current.url, result, Math.round(performance.now() - actionStart), null, { changed, fallback: !!result?.fallback, opened: action.type === 'open' ? { url: result?.url, title: result?.title } : undefined });
   currentAction(null);
   return 'ok';
 }
@@ -913,7 +982,7 @@ const COMMANDS = [
   { cmd: '/auto-plan', hint: "Let the agent decide about a checklist", run: () => setPlanMode('auto') },
   { cmd: '/skill', hint: 'Save this run as a reusable skill', run: () => saveSkill().catch(e => notify(e.message || 'Could not save the skill.', true)) },
   { cmd: '/saw', hint: 'Show the screenshot behind the last step', run: () => openSaw() },
-  { cmd: '/timings', hint: 'Show what a round costs', run: () => showTimings() },
+  { cmd: '/timings', hint: 'Open the speed panel', run: () => openTimings() },
   { cmd: '/stop', hint: 'Stop the running workflow', run: () => { stop(); notify('Workflow stopped.'); } }
 ];
 function setPlanMode(value) { planMode = value; chrome.storage.local.set({ planMode }); notify(value === 'always' ? 'Every task will get a checklist.' : value === 'never' ? 'Tasks will run without a checklist.' : 'The agent decides whether a checklist helps.'); }
@@ -1038,6 +1107,20 @@ $('stay-toggle').addEventListener('change', async () => {
   stayPut = $('stay-toggle').checked;
   await chrome.storage.local.set({ stayPut });
   notify(stayPut ? 'Working in the background — switch tabs freely.' : 'Switching to the working tab before each action.');
+});
+$('timings-btn').addEventListener('click', openTimings);
+$('timings-close').addEventListener('click', event => { event.preventDefault(); $('timings-dialog').close(); });
+$('timings-dialog').addEventListener('click', event => { if (event.target === $('timings-dialog')) $('timings-dialog').close(); });
+$('timings-export').addEventListener('click', () => {
+  if (!timings.length) { notify('No rounds logged yet.', true); return; }
+  download('mezze-timings.json', JSON.stringify(timings, null, 2));
+  notify('Timings exported.');
+});
+$('timings-clear').addEventListener('click', () => {
+  timings = [];
+  chrome.storage.local.set({ timings });
+  renderTimings();
+  notify('Timings cleared.');
 });
 chrome.runtime.onMessage.addListener(message => { if (message && message.type === 'pointerBlocked') notify('Pointer is on, but this page blocks the cursor overlay — the click still went ahead.', true); });
 
