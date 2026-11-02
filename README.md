@@ -134,6 +134,12 @@ The command refuses, with a reason rather than a silent empty transcript, on a p
 
 Every line carries the media time its slice covered, read from the element's `currentTime` at both ends of the slice rather than counted from the capture. That is what keeps the highlight honest when the video is paused, seeked, or played at another speed: the lit line is the one covering the current time, a gap between lines keeps the previous one lit, and clicking a line seeks to it. The island carries play/pause, ±5 seconds, 0.5×–2× speed, and a fullscreen button, because a transcript you cannot rewind is not much use. It lives in a shadow root, so no page stylesheet can restyle or hide it, and the last transcript per tab is kept for the session, which is what `/script` shows when nothing is being transcribed. Its ⧉ button hands the same panel to a real Picture-in-Picture window (Chrome 116+), so it floats above other applications rather than over the page; closing that window, or pressing ⧉ again, puts it back in the tab with its lines and highlight intact. The button is hidden where the browser has no document Picture-in-Picture.
 
+## Commands, skills, and what follows them
+
+Typing works as well as picking from the list. A slash token resolves as you type — the chip shows the command it matched and what it does, a prefix is enough when it is unambiguous (`/tr` is `/transcribe`), and an unmatched token gets a dashed chip that says it will be sent as text.
+
+Everything else in the message is context for what happens next. `/tr summarise the third point` transcribes the page and then starts the agent with "summarise the third point" as its goal, the transcript already in the chat for it to read. The same rule covers every command and every skill, so `/weekly-report focus on last month` runs that skill with your words as the goal: the skill supplies the method and you supply the specifics. If the command is still running when you send it — a transcription, a recording — the instruction is left in the box rather than fired at the wrong moment, and chips are clickable to run with the rest of the message as the goal.
+
 ## What a round costs
 
 The hourglass button in the topbar (and `/timings`) opens the speed panel: how long whole tasks take, then what the last 60 rounds actually spent, as medians with a stacked bar and the last rounds listed, exportable as `mezze-timings.json`.

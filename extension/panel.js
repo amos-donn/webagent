@@ -1787,35 +1787,57 @@ function slashToken(name) {
   return null;
 }
 
-function runResolved(resolved, rest = '') {
+// A command runs first, and whatever the person wrote around it becomes the goal of the run that
+// follows, with the command's own output already in the chat as context. That is what makes
+// "/tr summarise the third point" mean something: transcribe, then ask the agent about the result.
+async function runResolved(resolved, rest = '') {
   if (!resolved) return false;
-  $('goal').value = rest;
+  $('goal').value = '';
   grow();
   renderChips();
   hideSuggest();
   if (resolved.kind === 'command') {
-    resolved.command.run();
-    if (rest) notify('Left the rest in the box: no command takes an argument yet.', false);
+    try { await resolved.command.run(); }
+    catch (e) {
+      notify(e.message || 'That command failed.', true);
+      if (rest) { $('goal').value = rest; grow(); renderChips(); }
+      return true;
+    }
+    if (!rest) return true;
+    // A command that is still running (a transcription, a recording) keeps the instruction in the box
+    // rather than firing a run at the wrong moment.
+    if (workflow || macroRun || rec || transcribeRun) {
+      $('goal').value = rest; grow(); renderChips();
+      notify('Left your instruction in the box — the command is still running.', false);
+      return true;
+    }
+    try { await startWorkflow(rest); }
+    catch (e) { $('goal').value = rest; grow(); renderChips(); notify(e.message || 'Left your instruction in the box.', true); }
     return true;
   }
-  if (resolved.kind === 'skill') {
-    startWorkflow(rest || resolved.skill.prompt || (resolved.skill.steps || []).join(' → '), resolved.skill)
-      .catch(e => notify(e.message || 'Could not run that skill.', true));
-    return true;
-  }
-  startWorkflow(rest || resolved.skill.defaultGoal || 'Summarize this page', resolved.skill)
-    .catch(e => notify(e.message || 'Could not run that skill.', true));
+  // A skill supplies the method and the person supplies the specifics: the skill's prompt travels with
+  // the run and the words after the token are its goal.
+  const fallback = resolved.kind === 'skill'
+    ? (resolved.skill.prompt || (resolved.skill.steps || []).join(' → '))
+    : (resolved.skill.defaultGoal || 'Summarize this page');
+  startWorkflow(rest || fallback, resolved.skill).catch(e => notify(e.message || 'Could not run that skill.', true));
   return true;
 }
 
 function renderChips() {
   const box = $('command-chips');
   if (!box) return;
-  const tokens = [...$('goal').value.matchAll(/(^|\s)\/([a-z][a-z0-9-]*)/gi)].map(match => ({ name: match[2], leading: match.index === 0 }));
+  const value = $('goal').value;
+  const tokens = [...value.matchAll(/(^|\s)\/([a-z][a-z0-9-]*)/gi)].map(match => {
+    const start = match.index + match[1].length;
+    return { name: match[2], start, end: start + 1 + match[2].length, rest: `${value.slice(0, start)} ${value.slice(start + 1 + match[2].length)}`.trim() };
+  });
   box.textContent = '';
   if (!tokens.length) { box.hidden = true; return; }
-  for (const token of tokens) {
+  const primary = tokens.findIndex(item => slashToken(item.name));
+  tokens.forEach((token, index) => {
     const resolved = slashToken(token.name);
+    const runs = index === primary;
     const chip = document.createElement('button');
     chip.type = 'button';
     chip.className = 'command-chip' + (resolved ? '' : ' unknown');
@@ -1824,19 +1846,19 @@ function renderChips() {
     const hint = document.createElement('span');
     hint.textContent = resolved ? resolved.hint : 'not a command — sent as text';
     chip.append(label, hint);
-    if (resolved && token.leading) {
+    if (resolved && runs) {
       const enter = document.createElement('span');
       enter.className = 'enter';
       enter.textContent = '↵';
       chip.append(enter);
     }
     chip.title = resolved
-      ? `${resolved.hint}${token.leading ? ' — Enter runs this' : ' — click to run it'}`
+      ? `${resolved.hint}${runs ? ' — Enter runs this, then the rest of the message is its goal' : ' — click to run it with the message as its goal'}`
       : 'This is not a command, so it will be sent to the agent as text.';
-    if (resolved) chip.addEventListener('click', () => runResolved(resolved, ''));
+    if (resolved) chip.addEventListener('click', () => { runResolved(resolved, token.rest).catch(() => {}); });
     else chip.addEventListener('click', () => notify('That is not a command. Commands start with / and resolve as you type.', true));
     box.append(chip);
-  }
+  });
   box.hidden = false;
 }
 function renderSuggest() {
@@ -1868,11 +1890,17 @@ $('composer').addEventListener('submit', async event => {
   if (rec) { notify('Save or cancel the recording first.', true); return; }
   const goal = $('goal').value.trim();
   if (!goal) return;
-  // Typing a command and pressing Enter used to send the slash command to the model as a goal. A
-  // leading token that resolves runs the command instead, and anything after it stays in the box.
-  const leading = goal.match(/^\/([a-z][a-z0-9-]*)\s*([\s\S]*)$/i);
-  const resolved = leading ? slashToken(leading[1]) : null;
-  if (resolved) { runResolved(resolved, leading[2].trim()); return; }
+  // The first slash token that resolves is the command; everything else in the message is the goal of
+  // whatever follows, whether that is the agent or the skill the token named.
+  const token = [...goal.matchAll(/(^|\s)\/([a-z][a-z0-9-]*)/gi)]
+    .map(match => { const start = match.index + match[1].length; return { name: match[2], start, end: start + 1 + match[2].length }; })
+    .map(item => ({ ...item, resolved: slashToken(item.name) }))
+    .find(item => item.resolved);
+  if (token) {
+    const rest = `${goal.slice(0, token.start)} ${goal.slice(token.end)}`.trim();
+    runResolved(token.resolved, rest).catch(() => {});
+    return;
+  }
   if (goal.length > 4000) { notify('Keep your task under 4,000 characters.', true); return; }
   hideSuggest();
   try { await startWorkflow(goal); } catch (e) { notify(e.message || 'Something went wrong.', true); }
