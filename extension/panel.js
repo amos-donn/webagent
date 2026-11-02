@@ -6,6 +6,15 @@ const MAX_CHATS = 20;
 const MAX_MESSAGES = 400;
 const RISK = /\b(buy now|place order|pay now|purchase|checkout|transfer|withdraw|delete account|close account|cancel subscription)\b/i;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+// Nothing in a run may wait forever: a hung Worker, debugger or tab becomes a retry, not a stall.
+const REQUEST_TIMEOUT = 50000;
+const PLAN_TIMEOUT = 22000;
+const OBSERVE_TIMEOUT = 30000;
+function timed(promise, ms, message) {
+  let timer;
+  const timeout = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(message)), ms); });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
 let workflow = null, proposal = null, plan = [], chats = [], chat = null;
 let tabCache = [], actingTabId = null, contextIds = [];
 // There is no mode picker any more: every round runs on its own, and a risky-looking step is still
@@ -28,7 +37,9 @@ async function send(type, data = {}) { const out = await chrome.runtime.sendMess
 // A per-minute cap is a pause, not a failure: count it down and pick the run back up by itself.
 const COOLDOWN_SECONDS = 30;
 const COOLDOWN_LIMIT = 6;
-const RATE_LIMIT = /(rate limit|rate-limit|quota|too many requests|resource.?exhausted)/i;
+// Every Worker failure says "…and rate limits." in its boilerplate, so the bare phrase is not a signal;
+// only a real quota answer counts, otherwise a fast 404 would be waited out six times.
+const RATE_LIMIT = /(quota|too many requests|resource.?exhausted|rate limit exceeded|limit reached)/i;
 let cooldowns = 0;
 const isRateLimit = (status, message) => Number(status) === 429 || RATE_LIMIT.test(String(message || ''));
 async function cooldown(seconds = COOLDOWN_SECONDS) {
@@ -46,7 +57,7 @@ async function api(path, data, retries = 2) {
   let lastError = new Error('Request failed.');
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
-      const res = await fetch(base + path, { method: 'POST', headers: { 'Content-Type':'application/json' }, body: JSON.stringify(data) });
+      const res = await fetch(base + path, { method: 'POST', headers: { 'Content-Type':'application/json' }, body: JSON.stringify(data), signal: AbortSignal.timeout(REQUEST_TIMEOUT) });
       const out = await res.json().catch(() => ({}));
       if (res.ok) { cooldowns = 0; return out; }
       const error = new Error(out.error || `Request failed (${res.status}).`);
@@ -61,6 +72,7 @@ async function api(path, data, retries = 2) {
     } catch (e) {
       lastError = e;
       if (e.code === 'RATE_LIMIT') throw e;
+      if (e.name === 'TimeoutError') e.message = `The Worker did not answer within ${REQUEST_TIMEOUT / 1000}s.`;
       if (/failed \(4/.test(e.message) || /limit reached/i.test(e.message)) throw e;
     }
     if (attempt < retries) await sleep(400 * (attempt + 1));
@@ -112,7 +124,7 @@ async function finalCheck(run, claim, incomplete = []) {
   loading('Checking the result', 'check');
   $('loading-label').textContent = 'Checking the result against the page';
   let shot = null;
-  try { shot = await send('observe', { tabId: run.actingTabId, activate: false }); } catch { /* the transcript still allows a report */ }
+  try { shot = await timed(send('observe', { tabId: run.actingTabId, activate: false }), 20000, 'The final check could not read the page.'); } catch { /* the transcript still allows a report */ }
   if (workflow !== run) return;
   let report;
   try {
@@ -403,12 +415,12 @@ async function next(run, prefetched) {
   try { await permission(); }
   catch (e) { if (workflow !== run) return; halt(run, e.message); return; }
   let shot = prefetched;
-  if (!shot) { loading(`Reading ${shortTitle(acting)}`, 'eye'); shot = await send('observe', { tabId: acting.id, activate: true }); if (workflow !== run) return; }
+  if (!shot) { loading(`Reading ${shortTitle(acting)}`, 'eye'); shot = await timed(send('observe', { tabId: acting.id, activate: true }), OBSERVE_TIMEOUT, `Reading ${shortTitle(acting)} took too long — the tab may be stuck or closed.`); if (workflow !== run) return; }
   const hash = textHash(shot.text);
   run.stalled = hash === run.lastHash ? (run.stalled || 0) + 1 : 0;
   run.apiRetries = 0;
   run.lastHash = hash;
-  const read = await Promise.all(contexts.map(t => send('context', { tabId: t.id }).then(c => c.text ? { id: t.id, url: c.url, title: c.title, text: c.text.slice(0, 12000) } : null).catch(() => null)));
+  const read = await Promise.all(contexts.map(t => timed(send('context', { tabId: t.id }), 15000, 'The context tab did not answer.').then(c => c.text ? { id: t.id, url: c.url, title: c.title, text: c.text.slice(0, 12000) } : null).catch(() => null)));
   const extra = read.filter(Boolean).map(c => ({ url: c.url, title: c.title, text: c.text }));
   // A switch action names a tab by its position in this list, so the mapping must match the payload exactly.
   run.contextTabs = read.filter(Boolean).map(c => c.id);
@@ -593,7 +605,7 @@ async function startWorkflow(goal, skill) {
   $('start').hidden = true; $('stop').hidden = false; $('goal').disabled = true;
   loading('Reading the page', 'eye');
   try {
-    const observed = send('observe', { tabId: acting.id, activate: true });
+    const observed = timed(send('observe', { tabId: acting.id, activate: true }), OBSERVE_TIMEOUT, 'Reading the page took too long — the tab may be stuck or closed.');
     if (planMode === 'never') {
       const shot = await observed;
       if (workflow !== run) return;
@@ -601,11 +613,14 @@ async function startWorkflow(goal, skill) {
       await next(run, shot);
       return;
     }
-    const [planned, shot] = await Promise.allSettled([api('/plan', { goal: aimed(run), url: acting.url, title: acting.title }), observed]);
+    // A slow planner must not hold the whole run on "Reading the page": it gets a short budget and the
+    // page work starts with or without a checklist.
+    const [planned, shot] = await Promise.allSettled([timed(api('/plan', { goal: aimed(run), url: acting.url, title: acting.title }), PLAN_TIMEOUT, 'The planner did not answer in time.'), observed]);
     if (workflow !== run) return;
     if (shot.status === 'rejected') throw shot.reason;
     if (planned.status === 'fulfilled' && planned.value.todos?.length) plan = planned.value.todos;
     else if (planMode === 'always') plan = [{ id: '1', title: goal.slice(0, 140), done: false }];
+    else if (planned.status === 'rejected') pushMessage('note', 'No checklist this time — the planner was slow, so I went straight to the page.');
     else pushMessage('note', 'This task is short enough to run without a checklist.');
     renderPlan();
     persist().catch(() => {});

@@ -528,3 +528,31 @@ test('a Gemini rate limit comes back as 429 so the panel can wait it out', async
     assert.match((await response.json()).error, /Gemini request failed \(429\)/);
   } finally { globalThis.fetch = original; }
 });
+
+test('a model the key cannot use falls back instead of failing the round', async () => {
+  const original = globalThis.fetch;
+  const urls = [];
+  globalThis.fetch = async url => {
+    urls.push(String(url));
+    if (String(url).includes('gemini-3.8-flash')) return new Response(JSON.stringify({ error:{ message:'models/gemini-3.8-flash is not found for API version v1beta, or is not supported for generateContent.' } }), { status:404, headers:{ 'Content-Type':'application/json' } });
+    return Response.json({ candidates:[{ content:{ role:'model', parts:[{ text: JSON.stringify({ actions:[click()] }) }] }, finishReason:'STOP' }] });
+  };
+  try {
+    const response = await worker.fetch(request(observation), { DB:db, GEMINI_API_KEY:'test-key' });
+    assert.equal(response.status, 200, 'an unavailable model is not the end of the run');
+    assert.equal((await response.json()).action.type, 'click');
+    assert.match(urls.at(-1), /gemini-3\.6-flash:generateContent$/);
+  } finally { globalThis.fetch = original; }
+});
+
+test('an explicit GEMINI_MODEL is obeyed even when it is unavailable', async () => {
+  const original = globalThis.fetch;
+  const urls = [];
+  globalThis.fetch = async url => { urls.push(String(url)); return new Response(JSON.stringify({ error:{ message:'models/gemini-9-nope is not found' } }), { status:404, headers:{ 'Content-Type':'application/json' } }); };
+  try {
+    const response = await worker.fetch(request(observation), { DB:db, GEMINI_API_KEY:'test-key', GEMINI_MODEL:'gemini-9-nope' });
+    assert.equal(response.status, 400);
+    assert.match((await response.json()).error, /gemini-9-nope/);
+    assert.ok(urls.every(url => url.includes('gemini-9-nope')), 'no silent substitution of a configured model');
+  } finally { globalThis.fetch = original; }
+});
