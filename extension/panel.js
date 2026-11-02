@@ -1,10 +1,11 @@
 const $ = id => document.getElementById(id);
-const ICONS = { think:'sparkle', click:'cursor-click', type:'keyboard', write:'sparkle', read:'book-open-text', scroll:'arrows-down-up', wait:'hourglass', navigate:'arrow-right', key:'key-return', switch:'arrow-right', open:'plus', gather:'book-open-text', close:'x', select:'arrows-down-up', secret:'keyboard' };
+const ICONS = { think:'sparkle', click:'cursor-click', type:'keyboard', write:'sparkle', read:'book-open-text', scroll:'arrows-down-up', wait:'hourglass', navigate:'arrow-right', key:'key-return', switch:'arrow-right', open:'plus', gather:'book-open-text', close:'x', select:'arrows-down-up', secret:'keyboard', transcribe:'book-open-text' };
 // Two names per step: what it is doing while it runs, and what it did once it finished. The
 // timeline keeps the past tense because it is a record of work, not a spinner that vanished.
 const VERBS = {
   think: ['Thinking', 'Thought'], click: ['Clicking', 'Clicked'], type: ['Typing', 'Typed'],
   write: ['Writing with Gemini', 'Wrote'], read: ['Reading the page', 'Read the page'],
+  transcribe: ['Transcribing audio', 'Transcribed audio'],
   scroll: ['Scrolling', 'Scrolled'], wait: ['Waiting', 'Waited'],
   navigate: ['Opening the page', 'Opened the page'], key: ['Pressing a key', 'Pressed a key'],
   switch: ['Switching tabs', 'Switched tabs'],
@@ -670,6 +671,8 @@ function exportChat() {
 
 /* ---------- workflow ---------- */
 function stop() {
+  // The stop button and Escape mean the same thing for a transcription as for a run.
+  if (transcribeRun) { stopTranscribe(); return; }
   const running = workflow;
   rememberSteps(running);
   flushTiming(running);
@@ -1135,6 +1138,126 @@ async function startWorkflow(goal, skill) {
 }
 
 /* ---------- composer & palette ---------- */
+/* ---------- transcription ---------- */
+// /transcribe reads the audio of the video or audio element the page is playing, in ten-second
+// slices, and sends each slice to the Worker. Nothing is downloaded from the site and no media file
+// is stored: the element's own track is captured as it plays, which is the only path that also works
+// for a player that streams through MediaSource and never exposes a file.
+let transcribeRun = null;
+
+function transcribeUi(on) {
+  $('stop').hidden = !on; $('start').hidden = on; $('goal').disabled = on; $('run-dot').hidden = !on;
+  if (!on) { $('loading').hidden = true; currentAction(null); }
+}
+
+function renderTranscribe() {
+  const run = transcribeRun;
+  if (!run) return;
+  const heard = run.duration ? `${MezzeAudio.stamp(run.seconds)} of ${MezzeAudio.stamp(run.duration)}` : MezzeAudio.stamp(run.seconds);
+  loading(`Transcribing ${heard}`, 'book-open-text');
+}
+
+async function transcribePage(url) {
+  if (transcribeRun) throw new Error('A transcription is already running.');
+  if (workflow || macroRun) throw new Error('Stop the run in progress first.');
+  await listTabs().catch(() => {});
+  let tab = tabCache.find(item => item.id === actingTabId) || tabCache.find(item => item.active) || tabCache[0];
+  if (!tab?.id) throw new Error('Open the page with the video first.');
+  if (url) {
+    await permission(url);
+    await chrome.tabs.update(tab.id, { url, active: !stayPut });
+    tab = await waitForTab(tab.id, 20000);
+    if (!tab?.id) throw new Error('That page did not open.');
+    actingTabId = tab.id;
+    renderTabs();
+  }
+  const session = crypto.randomUUID();
+  transcribeRun = { session, tabId: tab.id, text: [], queue: [], parts: 0, seconds: 0, duration: 0, done: false, finished: false, busy: false };
+  let out;
+  try { out = await send('capture-start', { tabId: tab.id, session }); }
+  catch (e) { transcribeRun = null; throw e; }
+  if (out?.state !== 'running') {
+    transcribeRun = null;
+    throw new Error(out?.error || 'No video or audio was found on this page.');
+  }
+  transcribeRun.duration = Number(out.duration) || 0;
+  transcribeUi(true);
+  currentAction('Recording the audio from this page');
+  renderTranscribe();
+  pushMessage('note', `Transcribing the audio from ${shortTitle(tab)}. It is captured as it plays, so this takes as long as the video runs — keep this panel open.`);
+  if (out.paused) pushMessage('note', 'The player is paused. Press play on the video and the transcription continues by itself.');
+}
+
+async function onTranscribeEvent(event) {
+  const run = transcribeRun;
+  if (!run || !event?.event) return;
+  if (event.event === 'start') { run.duration = Number(event.duration) || run.duration; renderTranscribe(); return; }
+  if (event.event === 'progress') { run.seconds = Number(event.seconds) || run.seconds; renderTranscribe(); return; }
+  if (event.event === 'chunk') {
+    run.seconds = Number(event.seconds) || run.seconds;
+    run.queue.push({ part: Number(event.part) || run.parts + 1, audio: event.audio, mimeType: event.mimeType, seconds: run.seconds });
+    pumpTranscribe();
+    return;
+  }
+  if (event.event === 'done') { run.done = true; run.seconds = Number(event.seconds) || run.seconds; pumpTranscribe(); }
+}
+
+// Slices are transcribed one at a time, in order: a queue keeps the transcript chronological when
+// Gemini answers faster than the video plays, and one failure stops the run rather than piling up.
+async function pumpTranscribe() {
+  const run = transcribeRun;
+  if (!run || run.busy) return;
+  run.busy = true;
+  try {
+    while (transcribeRun === run) {
+      if (!run.queue.length) { if (run.done) await finishTranscribe(); return; }
+      const job = run.queue.shift();
+      run.parts = Math.max(run.parts, job.part);
+      currentAction(`Transcribing ${MezzeAudio.stamp(job.seconds)}`);
+      const out = await api('/transcribe', { audio: job.audio, mimeType: job.mimeType, part: job.part, seconds: job.seconds });
+      if (out?.text) run.text = [...run.text, out.text];
+      renderTranscribe();
+    }
+  } catch (e) {
+    const partial = MezzeAudio.joinParts(run.text);
+    await stopTranscribe();
+    if (partial) pushMessage('assistant', partial);
+    notify(e.message || 'Transcription stopped.', true);
+  } finally {
+    if (transcribeRun === run) {
+      run.busy = false;
+      // A slice that arrived while the loop was finishing its last request would otherwise wait for
+      // the next one, so pick the queue back up here.
+      if (run.queue.length) pumpTranscribe();
+    }
+  }
+}
+
+async function finishTranscribe() {
+  const run = transcribeRun;
+  if (!run || run.finished) return;
+  run.finished = true;
+  const text = MezzeAudio.joinParts(run.text);
+  const words = text ? text.split(/\s+/).length : 0;
+  transcribeRun = null;
+  transcribeUi(false);
+  if (!text) { notify('No speech was found in that audio.', true); return; }
+  pushMessage('assistant', text);
+  download(`mezze-transcript-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.txt`, text);
+  notify(`Transcript ready — ${words} word${words === 1 ? '' : 's'}, saved as a text file.`);
+}
+
+async function stopTranscribe() {
+  const run = transcribeRun;
+  transcribeRun = null;
+  if (!run) return;
+  await send('capture-stop', { tabId: run.tabId, session: run.session }).catch(() => {});
+  transcribeUi(false);
+  const text = MezzeAudio.joinParts(run.text);
+  if (text) { pushMessage('assistant', text); notify('Stopped — what was transcribed so far is in the chat.'); }
+  else notify('Transcription stopped.');
+}
+
 const COMMANDS = [
   { cmd: '/new', hint: 'Start a fresh chat', run: () => newChat() },
   { cmd: '/chats', hint: 'Open chat history', run: () => openHistory() },
@@ -1145,6 +1268,7 @@ const COMMANDS = [
   { cmd: '/skill', hint: 'Save this run as a reusable skill', run: () => saveSkill().catch(e => notify(e.message || 'Could not save the skill.', true)) },
   { cmd: '/record', hint: 'Record a macro in this tab', run: () => { openMacros(); startRecording().catch(e => notify(e.message || 'Could not start recording.', true)); } },
   { cmd: '/macros', hint: 'Open recorded macros', run: () => openMacros() },
+  { cmd: '/transcribe', hint: 'Transcribe the audio of the video on this page', run: () => transcribePage().catch(e => notify(e.message || 'Could not transcribe this page.', true)) },
   { cmd: '/saw', hint: 'Show the screenshot behind the last step', run: () => openSaw() },
   { cmd: '/timings', hint: 'Open the speed panel', run: () => openTimings() },
   { cmd: '/stop', hint: 'Stop the running workflow', run: () => { stop(); notify('Workflow stopped.'); } }
@@ -1710,6 +1834,9 @@ chrome.runtime.onMessage.addListener((message, sender) => {
     const from = sender?.tab?.id;
     if (from && from !== rec.tabId) macroEnterTab(from, message.event, sender.tab);
     onMacroEvent(message.event);
+  }
+  if (message?.type === 'transcribe-event' && transcribeRun && message.session === transcribeRun.session && (!sender?.tab?.id || sender.tab.id === transcribeRun.tabId)) {
+    onTranscribeEvent(message).catch(() => {});
   }
 });
 

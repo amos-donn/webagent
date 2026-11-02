@@ -461,6 +461,53 @@ async function gemini(env, { prompt, image, maxTokens, speed = DEFAULT_SPEED, de
   }
   throw lastError;
 }
+// Transcription is not a JSON task: the audio is the input and the transcript is the whole answer, so
+// this is a plain generateContent with a text response rather than the structured call above. Silence
+// is a legitimate answer, so an empty transcript is returned instead of treated as a failure.
+async function transcribe(env, { audio, mimeType, prompt, deadline }) {
+  const started = Date.now();
+  const model = modelName(env);
+  let lastError = new Error('Gemini could not transcribe that audio.');
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const left = deadline - Date.now();
+    if (left < 4000) break;
+    try {
+      const response = await fetch(`${GEMINI_ROOT}${encodeURIComponent(model)}:generateContent`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': env.GEMINI_API_KEY },
+        body: JSON.stringify({
+          contents: [{ role: 'user', parts: [{ text: prompt }, { inlineData: { mimeType, data: audio } }] }],
+          generationConfig: { temperature: 0, maxOutputTokens: 4096 }
+        }),
+        // Transcribing ten seconds of speech takes longer than picking the next action, so this call
+        // gets its own, generous budget rather than the agent's turn budget.
+        signal: AbortSignal.timeout(Math.min(MODEL_TIMEOUT * 2, left - 1000))
+      });
+      const data = await response.json().catch(() => null);
+      if (!response.ok) {
+        const detail = clip(data?.error?.message, 200);
+        const error = new Error(`Gemini could not transcribe that audio (${response.status})${detail ? `: ${detail}` : ''}.`);
+        error.retry = response.status === 429 || response.status >= 500;
+        error.status = response.status;
+        throw error;
+      }
+      const candidate = data?.candidates?.[0];
+      const text = (candidate?.content?.parts || [])
+        .filter(part => part?.thought !== true)
+        .map(part => typeof part.text === 'string' ? part.text : '')
+        .join('')
+        .trim();
+      return { text, ms: Date.now() - started, model };
+    } catch (thrown) {
+      lastError = thrown?.name === 'TimeoutError' || thrown?.name === 'AbortError'
+        ? Object.assign(new Error('Gemini did not answer in time for that audio segment.'), { status: 504, retry: true })
+        : thrown;
+      if (lastError.retry === false) throw lastError;
+    }
+    await pause(400 * attempt);
+  }
+  throw lastError;
+}
 export default {
   async fetch(request, env) {
     if (request.method === 'OPTIONS') return json({ ok: true });
@@ -584,6 +631,26 @@ export default {
           }
         });
         return new Response(body_, { headers: { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-store' } });
+      }
+      // Audio in, transcript out. The panel captures the page's own audio track and sends it in ten-
+      // second WAV slices, so one call is always a short piece of speech and the request stays inside
+      // both the Worker's body limit and Gemini's inline-data limit.
+      if (path === '/transcribe' && request.method === 'POST') {
+        if (await limited(env.DB, 'transcribe:' + ip, 240, 3600000)) return json({ error: 'Transcription limit reached. Try again later.' }, 429);
+        if (!env.GEMINI_API_KEY) return json({ error: 'Server is missing GEMINI_API_KEY.' }, 400);
+        const input = await body(request, 8000000);
+        const audio = typeof input.audio === 'string' ? input.audio : '';
+        if (!audio) return json({ error: 'No audio was sent.' }, 400);
+        if (audio.length > 6000000) return json({ error: 'That audio segment is too large.' }, 413);
+        const mimeType = typeof input.mimeType === 'string' && /^audio\/[a-z0-9.+-]{1,40}$/i.test(input.mimeType) ? input.mimeType : 'audio/wav';
+        const part = Number.isFinite(Number(input.part)) && Number(input.part) > 0 ? Math.floor(Number(input.part)) : 0;
+        const parts = Number.isFinite(Number(input.parts)) && Number(input.parts) > 1 ? Math.floor(Number(input.parts)) : 0;
+        const language = typeof input.language === 'string' ? clip(input.language, 40) : '';
+        const where = part > 1 ? `This is part ${part}${parts ? ` of about ${parts}` : ''} of one continuous recording. Earlier and later parts are transcribed separately, so do not introduce, summarise or close anything: return only the speech in this slice.` : 'This is one continuous recording.';
+        const prompt = `Transcribe the speech in this audio exactly as it is spoken, in the language it is spoken in${language ? ` (expected: ${language})` : ''}. ${where}
+Rules: no speaker labels, no timestamps, no commentary, no summary, no translation. Keep punctuation and paragraph breaks where the speaker pauses. Write [unclear] for a word you cannot resolve instead of guessing. If this slice has no speech at all, return an empty reply.`;
+        const { text, ms, model } = await transcribe(env, { audio, mimeType, prompt, deadline: Date.now() + 55000 });
+        return json({ text, ms, model, part });
       }
       if (path === '/review' && request.method === 'POST') {
         if (await limited(env.DB, 'review:' + ip, 60, 3600000)) return json({ error: 'Review limit reached. Try again later.' }, 429);

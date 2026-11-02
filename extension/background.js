@@ -857,6 +857,78 @@ function uninstallRecorder(session) {
   if (recorder && (!session || recorder.session === session)) recorder.stop();
   return true;
 }
+// /transcribe records the audio the page is already playing. The element's own track is captured in
+// the page rather than downloading the media: a streaming player exposes no file at all, and the
+// browser is already decoding the audio, so this is the one path that works both for a plain
+// <video src="…"> and for a player that feeds the element through MediaSource.
+async function captureMediaAudio(session) {
+  if (window.__mezzeCapture?.session === session) return { state: 'running', duration: window.__mezzeCapture.duration, paused: window.__mezzeCapture.paused };
+  window.__mezzeCapture?.stop();
+  const media = [...document.querySelectorAll('video,audio')]
+    .filter(el => el.currentSrc || el.duration > 0.5)
+    .sort((a, b) => (b.duration || 0) - (a.duration || 0))[0];
+  if (!media) return { state: 'none', error: 'No video or audio was found on this page.' };
+  if (media.mediaKeys) return { state: 'blocked', error: 'This video is protected (DRM), so its audio cannot be captured.' };
+  if (!window.MezzeAudio) return { state: 'blocked', error: 'The audio helpers did not load on this page.' };
+  const audio = window.MezzeAudio;
+  const send = payload => { try { chrome.runtime.sendMessage({ type: 'transcribe-event', session, ...payload }); } catch { /* panel closed */ } };
+  if (media.paused) await media.play().catch(() => {});
+  let stream = null;
+  try { stream = typeof media.captureStream === 'function' ? media.captureStream() : media.mozCaptureStream?.(); } catch { stream = null; }
+  if (!stream?.getAudioTracks?.().length) return { state: 'silent', error: 'That player exposes no audio track to transcribe.' };
+  const context = new AudioContext({ sampleRate: audio.RATE });
+  const source = context.createMediaStreamSource(stream);
+  const processor = context.createScriptProcessor(4096, 1, 1);
+  const mute = context.createGain();
+  mute.gain.value = 0;
+  const chunk = new Float32Array(audio.RATE * audio.SLICE);
+  let filled = 0, part = 0, samples = 0, stopped = false;
+  const duration = Number(media.duration) || 0;
+  const flush = () => {
+    if (!filled) return;
+    part += 1;
+    const bytes = audio.wavBytes(chunk.subarray(0, filled), audio.RATE);
+    send({ event: 'chunk', part, audio: audio.base64(bytes), mimeType: 'audio/wav', seconds: Math.round(samples / audio.RATE) });
+    filled = 0;
+  };
+  const onAudio = event => {
+    if (stopped) return;
+    // A paused video produces silence, and silence is a wasted request: nothing is collected until it
+    // plays again.
+    if (media.paused || media.ended) return;
+    const input = event.inputBuffer.getChannelData(0);
+    for (let i = 0; i < input.length; i++) {
+      chunk[filled++] = input[i];
+      samples += 1;
+      if (filled === chunk.length) { flush(); break; }
+    }
+  };
+  const finish = reason => {
+    if (stopped) return;
+    stopped = true;
+    clearInterval(ticker);
+    flush();
+    media.removeEventListener?.('ended', onEnded);
+    try { processor.disconnect(); source.disconnect(); mute.disconnect(); context.close(); } catch { /* already closed */ }
+    send({ event: 'done', reason, seconds: Math.round(samples / audio.RATE), parts: part });
+    delete window.__mezzeCapture;
+  };
+  const onEnded = () => finish('ended');
+  processor.onaudioprocess = onAudio;
+  source.connect(processor);
+  processor.connect(mute);
+  mute.connect(context.destination);
+  media.addEventListener('ended', onEnded);
+  const ticker = setInterval(() => send({ event: 'progress', seconds: Math.round(samples / audio.RATE), duration }), 5000);
+  window.__mezzeCapture = { session, duration, paused: !!media.paused, stop: () => finish('stopped') };
+  send({ event: 'start', duration, title: document.title, url: location.href });
+  return { state: 'running', duration, paused: !!media.paused, title: document.title, url: location.href };
+}
+function stopCapture(session) {
+  const capture = window.__mezzeCapture;
+  if (capture && (!session || capture.session === session)) capture.stop();
+  return true;
+}
 // The session lives in session storage rather than a global, so it survives a service worker restart
 // and every navigation re-arms the recorder on the new document.
 async function armRecorder(tabId) {
@@ -1138,9 +1210,27 @@ async function handle(message) {
     await chrome.storage.session.remove(RECORD_KEY).catch(() => {});
     return { stopped: true };
   }
+  if (message.type === 'capture-start') {
+    const tab = await getTab(message.tabId);
+    if (!permitted(tab.url)) throw new Error('Transcribing needs an HTTPS page (or a local development page). Chrome internal pages are blocked.');
+    const session = String(message.session || '');
+    if (!session) throw new Error('Missing transcription session.');
+    // The helpers go in as a file so the capture function can use them; the capture itself stays one
+    // self-contained function because it runs inside the page.
+    await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['audio.js'] });
+    const [result] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: captureMediaAudio, args: [session] });
+    return result?.result || { state: 'none', error: 'The page did not answer.' };
+  }
+  if (message.type === 'capture-stop') {
+    const tab = await getTab(message.tabId);
+    await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: stopCapture, args: [String(message.session || '')] }).catch(() => {});
+    return { stopped: true };
+  }
   // The panel receives these directly from the page; answering here only stops the content script
   // from seeing "Unknown action" as a rejection.
   if (message.type === 'macro-event') return { ok: true };
+  // The audio slices travel from the page to the panel, which owns the Worker call and the transcript.
+  if (message.type === 'transcribe-event') return { ok: true };
   if (message.type === 'tabs') {
     // Every window, not just this one: the page you reference with @ is often in another window.
     const tabs = await chrome.tabs.query({});

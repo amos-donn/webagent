@@ -120,6 +120,14 @@ Recording follows you across tabs. If the task continues in another tab — a li
 
 **Keystrokes are steps only when repeating them does the same thing.** Enter in a field is recorded, because it submits the form; Escape is recorded, because it closes a dialog; and so are Ctrl/Cmd + A, C, V, X, Z and Y when the page rather than a field has focus. Pressing Ctrl+V *inside* a field is deliberately not a step — the pasted text is already that field's recorded value, and replaying the paste would insert whatever happens to be on the clipboard at that moment. The same reasoning covers Ctrl+A-then-type, Ctrl+X and Ctrl+Z in a field: the value after them is what gets stored. Tab, the arrow keys, Home/End and PageUp/PageDown are not recorded at all, since the next step names its own element and a recorded target is scrolled into view before it is used. A macro recorded on a Mac stores and shows Cmd; on Windows and Linux, Ctrl.
 
+## Transcribing a video's audio
+
+`/transcribe` reads the audio of the `<video>` or `<audio>` element on the page you are on, sends it to Gemini in ten-second slices, and puts the transcript in the chat and in a `.txt` download. Nothing is fetched from the site and no media file is stored: the element's own track is captured with `captureStream` while it plays, which is the only path that works for a player that streams through MediaSource and never exposes a file.
+
+That is also its cost, and it is worth being plain about. Transcription takes **as long as the video runs**, because the audio only exists while it is being played; the panel has to stay open and the tab has to keep playing, since pausing the video pauses the audio (a paused player is not sent as silence). Each ten-second slice is 16 kHz mono WAV — about 320 KB — encoded to roughly 430 KB of base64 and sent to the Worker as one request, so a long video is a series of small calls rather than one large upload. Slices are transcribed in order and joined, which is why a word split across a slice boundary can come back as two.
+
+The command refuses, with a reason rather than a silent empty transcript, on a protected (DRM) video, a page with no media, a player that exposes no audio track, and a `chrome://` page. Speech is transcribed verbatim in whatever language it is spoken, `[unclear]` marks a word the model could not resolve, and a slice with no speech is not sent at all.
+
 ## What a round costs
 
 The hourglass button in the topbar (and `/timings`) opens the speed panel: how long whole tasks take, then what the last 60 rounds actually spent, as medians with a stacked bar and the last rounds listed, exportable as `mezze-timings.json`.
