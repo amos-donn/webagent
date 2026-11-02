@@ -32,12 +32,22 @@ test('plan endpoint returns a numbered checklist without sending an image', asyn
   } finally { mock.restore(); }
 });
 
-test('the model is configurable with GEMINI_MODEL and defaults to 3.5 Flash-Lite', async () => {
+test('the model is configurable with GEMINI_MODEL and follows the speed setting', async () => {
   const defaults = scripted([{ steps:['One step'] }]);
   try {
     await worker.fetch(request({ goal:'Check prices', url:'https://example.com/' }, '/plan'), { DB:db, GEMINI_API_KEY:'test-key' });
-    assert.match(defaults.urls[0], /\/models\/gemini-3\.5-flash-lite:generateContent$/);
+    assert.match(defaults.urls[0], /\/models\/gemini-3\.5-flash-lite:generateContent$/, 'the default speed uses the light model');
   } finally { defaults.restore(); }
+  const careful = scripted([{ actions:[click()] }]);
+  try {
+    await worker.fetch(request({ ...observation, speed:'careful' }), { DB:db, GEMINI_API_KEY:'test-key' });
+    assert.match(careful.urls[0], /\/models\/gemini-3\.8-flash:generateContent$/, 'careful asks the strongest model');
+  } finally { careful.restore(); }
+  const unknown = scripted([{ actions:[click()] }]);
+  try {
+    await worker.fetch(request({ ...observation, speed:'ludicrous' }), { DB:db, GEMINI_API_KEY:'test-key' });
+    assert.match(unknown.urls[0], /\/models\/gemini-3\.5-flash-lite:generateContent$/, 'an unknown speed falls back to fast');
+  } finally { unknown.restore(); }
   const mock = scripted([{ steps:['One step'] }]);
   try {
     await worker.fetch(request({ goal:'Check prices', url:'https://example.com/' }, '/plan'), { DB:db, GEMINI_API_KEY:'test-key', GEMINI_MODEL:'models/gemini-3.8-flash' });
@@ -48,7 +58,7 @@ test('the model is configurable with GEMINI_MODEL and defaults to 3.5 Flash-Lite
 test('prompt carries the plan, condensed older steps, element hints and todo filtering', async () => {
   const mock = scripted([{ type:'click', x:5, y:5, description:'Open menu', completed:['2','99'] }]);
   const steps = [
-    ...Array.from({ length: 10 }, (_, i) => ({ type:'click', description:`old step ${i}`, ok:true })),
+    ...Array.from({ length: 18 }, (_, i) => ({ type:'click', description:`old step ${i}`, ok:true })),
     { type:'type', description:'typed a query', ok:false, note:'not a text field', page:'https://example.com/' }
   ];
   try {
@@ -97,7 +107,7 @@ test('a repeated click is corrected once and the second choice is returned', asy
     assert.equal(out.action.type, 'scroll');
     assert.equal(out.retried, true);
     assert.equal(mock.calls.length, 2);
-    assert.match(said(mock.calls[1]), /CORRECTION: click .* already tried 2 times/);
+    assert.match(said(mock.calls[1]), /CORRECTION: click .* already ran at step 1 and it worked/);
   } finally { mock.restore(); }
 });
 
@@ -178,6 +188,34 @@ test('a reply with several actions is returned as one batch', async () => {
     assert.match(prompt, /"actions"/);
     assert.match(prompt, /back to back/);
   } finally { mock.restore(); }
+});
+
+test('switch moves the run to a tab from the TABS list', async () => {
+  const contexts = [{ url:'https://news.example/', title:'News', text:'Headlines' }];
+  const tabs = [{ id:'t1', title:'Docs', url:'https://docs.example.com/', acting:true }, { id:'t2', title:'News', url:'https://news.example/', context:true }];
+  const mock = scripted([{ actions:[{ type:'switch', tab:'t2', description:'Work in the news tab' }] }]);
+  try {
+    const response = await worker.fetch(request({ ...observation, contexts, tabs }), { DB:db, GEMINI_API_KEY:'test-key' });
+    assert.equal(response.status, 200);
+    const out = await response.json();
+    assert.equal(out.action.type, 'switch');
+    assert.equal(out.action.tab, 't2');
+    const prompt = said(mock.calls[0]);
+    assert.match(prompt, /t2 \(context\) — News/);
+    assert.match(prompt, /"type":"switch","tab":"t2"/);
+  } finally { mock.restore(); }
+  const bad = scripted([{ actions:[{ type:'switch', tab:'zz', description:'Nope' }] }, { type:'scroll', direction:'down', description:'Reveal more' }]);
+  try {
+    await worker.fetch(request({ ...observation, contexts, tabs }), { DB:db, GEMINI_API_KEY:'test-key' });
+    assert.equal(bad.calls.length, 2, 'an impossible tab id is corrected, not accepted');
+    assert.match(said(bad.calls[1]), /That tab is not in the TABS list/);
+  } finally { bad.restore(); }
+  const batched = scripted([{ actions:[click(), { type:'switch', tab:'t1', description:'Go' }] }]);
+  try {
+    const response = await worker.fetch(request({ ...observation, contexts, tabs }), { DB:db, GEMINI_API_KEY:'test-key' });
+    assert.equal(response.status, 400);
+    assert.match((await response.json()).error, /cannot be batched/);
+  } finally { batched.restore(); }
 });
 
 test('done cannot be batched and the reply is corrected', async () => {
@@ -473,7 +511,7 @@ test('tab actions open a tab, and the prompt lists the tabs by id', async () => 
     assert.equal(out.action.type, 'open');
     assert.match(out.action.url, /^https:\/\/duckduckgo\.com\/\?q=standing(\+|%20)desk(\+|%20)prices/);
     const prompt = said(mock.calls[0]);
-    assert.match(prompt, /TABS \(the user’s tabs and yours; use these ids for focus, gather and close\):/);
+    assert.match(prompt, /TABS \(the user’s tabs and yours; use these ids for switch, gather and close\):/);
     assert.match(prompt, /t1 \(acting\) — Docs — https:\/\/docs\.example\.com\//);
     assert.match(prompt, /t2 \(opened by you\) — Prices/);
     assert.match(prompt, /- open: \{"type":"open","url":"https:\/\/\.\.\."/);
@@ -482,7 +520,7 @@ test('tab actions open a tab, and the prompt lists the tabs by id', async () => 
   } finally { mock.restore(); }
 });
 
-test('focus, gather and close are validated against the tab list', async () => {
+test('switch, gather and close are validated against the tab list', async () => {
   const gather = scripted([{ actions:[{ type:'gather', tabs:['t2','t2','t1'], description:'Read both tabs' }] }]);
   try {
     const response = await worker.fetch(request({ ...observation, tabs:[{ id:'t1', title:'Docs', url:'https://docs.example.com/', acting:true }] }), { DB:db, GEMINI_API_KEY:'test-key' });
@@ -491,7 +529,7 @@ test('focus, gather and close are validated against the tab list', async () => {
     assert.equal(out.action.type, 'gather');
     assert.deepEqual(out.action.tabs, ['t2','t1']);
   } finally { gather.restore(); }
-  const bad = scripted([{ actions:[{ type:'focus', tab:'z9', description:'Go back' }] }, { actions:[{ type:'focus', tab:'z9', description:'Go back' }] }]);
+  const bad = scripted([{ actions:[{ type:'switch', tab:'z9', description:'Go back' }] }, { actions:[{ type:'switch', tab:'z9', description:'Go back' }] }]);
   try {
     const response = await worker.fetch(request({ ...observation }), { DB:db, GEMINI_API_KEY:'test-key' });
     assert.equal(response.status, 400);
@@ -507,4 +545,73 @@ test('a tab action cannot be batched with a click', async () => {
     assert.equal(response.status, 400);
     assert.match((await response.json()).error, /cannot be batched/);
   } finally { mock.restore(); }
+});
+
+test('a control that already worked is not clicked again, and the prompt shows what is done', async () => {
+  const mock = scripted([{ actions:[{ type:'click', ref:'e12', description:'Open the menu' }] }, { type:'scroll', direction:'down', description:'Reveal the hours' }]);
+  const steps = [{ type:'click', ref:'e12', description:'Opened the menu', ok:true, changed:true, page:'https://example.com/menu' }];
+  try {
+    const response = await worker.fetch(request({ ...observation, refs:[{ ref:'e12', role:'button', name:'Menu' }], steps }), { DB:db, GEMINI_API_KEY:'test-key' });
+    const out = await response.json();
+    assert.equal(out.action.type, 'scroll');
+    assert.equal(mock.calls.length, 2);
+    assert.match(said(mock.calls[1]), /already ran at step 1 and it worked/);
+    const prompt = said(mock.calls[0]);
+    assert.match(prompt, /PROVEN DONE THIS RUN/);
+    assert.match(prompt, /click on ref=e12: Opened the menu/);
+    assert.match(prompt, /1\. click on ref=e12: Opened the menu/);
+    assert.match(prompt, /Do not do them again/);
+  } finally { mock.restore(); }
+});
+
+test('a click that keeps failing is corrected with the count, not silently repeated', async () => {
+  const mock = scripted([click(), { type:'scroll', direction:'down', description:'Reveal more menu items' }]);
+  const steps = [
+    { type:'click', x:10, y:20, description:'Open menu', ok:false, changed:false, note:'no visible change' },
+    { type:'click', x:11, y:21, description:'Open menu again', ok:false, changed:false }
+  ];
+  try {
+    const out = await (await worker.fetch(request({ ...observation, steps }), { DB:db, GEMINI_API_KEY:'test-key' })).json();
+    assert.equal(out.action.type, 'scroll');
+    assert.match(said(mock.calls[1]), /already tried 2 times and the page did not change/);
+    assert.doesNotMatch(said(mock.calls[0]), /PROVEN DONE THIS RUN/);
+  } finally { mock.restore(); }
+});
+
+test('a Gemini rate limit comes back as 429 so the panel can wait it out', async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({ error:{ message:'Resource has been exhausted (e.g. check quota).' } }), { status:429, headers:{ 'Content-Type':'application/json' } });
+  try {
+    const response = await worker.fetch(request(observation), { DB:db, GEMINI_API_KEY:'test-key' });
+    assert.equal(response.status, 429, 'a limit is not a rejected request');
+    assert.match((await response.json()).error, /Gemini request failed \(429\)/);
+  } finally { globalThis.fetch = original; }
+});
+
+test('a model the key cannot use falls back instead of failing the round', async () => {
+  const original = globalThis.fetch;
+  const urls = [];
+  globalThis.fetch = async url => {
+    urls.push(String(url));
+    if (String(url).includes('gemini-3.8-flash')) return new Response(JSON.stringify({ error:{ message:'models/gemini-3.8-flash is not found for API version v1beta, or is not supported for generateContent.' } }), { status:404, headers:{ 'Content-Type':'application/json' } });
+    return Response.json({ candidates:[{ content:{ role:'model', parts:[{ text: JSON.stringify({ actions:[click()] }) }] }, finishReason:'STOP' }] });
+  };
+  try {
+    const response = await worker.fetch(request({ ...observation, speed:'careful' }), { DB:db, GEMINI_API_KEY:'test-key' });
+    assert.equal(response.status, 200, 'an unavailable model is not the end of the run');
+    assert.equal((await response.json()).action.type, 'click');
+    assert.match(urls.at(-1), /gemini-3\.6-flash:generateContent$/);
+  } finally { globalThis.fetch = original; }
+});
+
+test('an explicit GEMINI_MODEL is obeyed even when it is unavailable', async () => {
+  const original = globalThis.fetch;
+  const urls = [];
+  globalThis.fetch = async url => { urls.push(String(url)); return new Response(JSON.stringify({ error:{ message:'models/gemini-9-nope is not found' } }), { status:404, headers:{ 'Content-Type':'application/json' } }); };
+  try {
+    const response = await worker.fetch(request(observation), { DB:db, GEMINI_API_KEY:'test-key', GEMINI_MODEL:'gemini-9-nope' });
+    assert.equal(response.status, 400);
+    assert.match((await response.json()).error, /gemini-9-nope/);
+    assert.ok(urls.every(url => url.includes('gemini-9-nope')), 'no silent substitution of a configured model');
+  } finally { globalThis.fetch = original; }
 });

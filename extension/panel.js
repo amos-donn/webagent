@@ -1,18 +1,34 @@
 const $ = id => document.getElementById(id);
-const ICONS = { think:'sparkle', click:'cursor-click', type:'keyboard', write:'sparkle', read:'book-open-text', scroll:'arrows-down-up', wait:'hourglass', navigate:'arrow-right', key:'key-return' };
-const LABELS = { think:'Thinking through', click:'Clicking', type:'Typing', write:'Writing with Gemini', read:'Reading page', scroll:'Scrolling', wait:'Waiting', navigate:'Navigating', key:'Pressing key', open:'Opening a new tab', focus:'Switching tabs', gather:'Reading tabs', close:'Closing a tab' };
-const TAB_STEPS = new Set(['open', 'focus', 'gather', 'close']);
-const STEP_LIMIT = 60;
+const ICONS = { think:'sparkle', click:'cursor-click', type:'keyboard', write:'sparkle', read:'book-open-text', scroll:'arrows-down-up', wait:'hourglass', navigate:'arrow-right', key:'key-return', switch:'arrow-right', open:'plus', gather:'book-open-text', close:'x' };
+const LABELS = { think:'Thinking through', click:'Clicking', type:'Typing', write:'Writing with Gemini', read:'Reading page', scroll:'Scrolling', wait:'Waiting', navigate:'Navigating', key:'Pressing key', switch:'Switching tabs', open:'Opening a new tab', gather:'Reading tabs', close:'Closing a tab' };
+const TAB_STEPS = new Set(['open', 'switch', 'gather', 'close']);const STEP_LIMIT = 60;
 const MAX_CHATS = 20;
 const MAX_MESSAGES = 400;
 const RISK = /\b(buy now|place order|pay now|purchase|checkout|transfer|withdraw|delete account|close account|cancel subscription)\b/i;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+// Nothing in a run may wait forever: a hung Worker, debugger or tab becomes a retry, not a stall.
+const REQUEST_TIMEOUT = 50000;
+const PLAN_TIMEOUT = 22000;
+const OBSERVE_TIMEOUT = 30000;
+function timed(promise, ms, message) {
+  let timer;
+  const timeout = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(message)), ms); });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
 let workflow = null, proposal = null, plan = [], chats = [], chat = null;
 let tabCache = [], actingTabId = null, contextIds = [];
+// There is no mode picker any more: every round runs on its own, and a risky-looking step is still
+// matched against the goal and announced in the timeline.
 let mode = 'autopilot', planMode = 'auto', lastShot = '', skills = [];
+// Speed moves the model and the pauses together: a light model answers in about a second, so a
+// 600 ms pause between actions is most of the wait. Careful is the old behaviour.
+let speed = 'fast', slowPages = false, stayPut = true;
+const PACING = { fast: 120, balanced: 400, careful: 800 };
+const SETTLE_MS = { fast: 800, balanced: 2200, careful: 4000 };
+const pace = () => PACING[speed] || PACING.balanced;
+const settleFor = () => (slowPages ? 4000 : SETTLE_MS[speed] || SETTLE_MS.balanced);
 
 function notify(text, error = false) { $('notice').textContent = text; $('notice').classList.toggle('error', error); $('notice').hidden = false; }
-function setStatus(text) { $('status').textContent = text || ''; $('status').hidden = !text; }
 function baseUrl() { const url = new URL($('worker').value.trim()); if (url.username || url.password || url.search || url.hash || (url.protocol !== 'https:' && !(url.protocol === 'http:' && ['localhost','127.0.0.1'].includes(url.hostname)))) throw new Error('Use an HTTPS Worker URL or localhost.'); return url.origin + url.pathname.replace(/\/$/, ''); }
 // Ask once for every site, not once per site: Chrome remembers this grant until you revoke it.
 const ALL_SITES = ['https://*/*', 'http://*/*'];
@@ -25,19 +41,45 @@ async function permission() {
 }
 async function activeUrl() { const [tab] = await chrome.tabs.query({ active: true, currentWindow: true }); if (!tab?.url) throw new Error('Select a webpage first.'); return tab.url; }
 async function send(type, data = {}) { const out = await chrome.runtime.sendMessage({ type, ...data }); if (out.error) throw Object.assign(new Error(out.error), { code: out.code || 'ERROR' }); return out.data; }
+// A per-minute cap is a pause, not a failure: count it down and pick the run back up by itself.
+const COOLDOWN_SECONDS = 30;
+const COOLDOWN_LIMIT = 6;
+// Every Worker failure says "…and rate limits." in its boilerplate, so the bare phrase is not a signal;
+// only a real quota answer counts, otherwise a fast 404 would be waited out six times.
+const RATE_LIMIT = /(quota|too many requests|resource.?exhausted|rate limit exceeded|limit reached)/i;
+let cooldowns = 0;
+const isRateLimit = (status, message) => Number(status) === 429 || RATE_LIMIT.test(String(message || ''));
+async function cooldown(seconds = COOLDOWN_SECONDS) {
+  const end = Date.now() + seconds * 1000;
+  cooldowns += 1;
+  notify(`The model hit its usage limit. Restarting in ${seconds}s.`);
+  while (Date.now() < end) {
+    const left = Math.max(1, Math.ceil((end - Date.now()) / 1000));
+    loading(`Usage limit — restarting in ${left}s`, 'hourglass');
+    await sleep(200);
+  }
+}
 async function api(path, data, retries = 2) {
   const base = baseUrl();
   let lastError = new Error('Request failed.');
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
-      const res = await fetch(base + path, { method: 'POST', headers: { 'Content-Type':'application/json' }, body: JSON.stringify(data) });
+      const res = await fetch(base + path, { method: 'POST', headers: { 'Content-Type':'application/json' }, body: JSON.stringify(data), signal: AbortSignal.timeout(REQUEST_TIMEOUT) });
       const out = await res.json().catch(() => ({}));
-      if (res.ok) return out;
+      if (res.ok) { cooldowns = 0; return out; }
       const error = new Error(out.error || `Request failed (${res.status}).`);
+      if (isRateLimit(res.status, error.message)) {
+        // Waiting does not spend a retry, and the cap keeps a hard outage from hanging forever.
+        if (cooldowns < COOLDOWN_LIMIT) { await cooldown(); attempt -= 1; continue; }
+        error.code = 'RATE_LIMIT';
+        throw error;
+      }
       if (res.status < 500 && res.status !== 429) throw error;
       lastError = error;
     } catch (e) {
       lastError = e;
+      if (e.code === 'RATE_LIMIT') throw e;
+      if (e.name === 'TimeoutError') e.message = `The Worker did not answer within ${REQUEST_TIMEOUT / 1000}s.`;
       if (/failed \(4/.test(e.message) || /limit reached/i.test(e.message)) throw e;
     }
     if (attempt < retries) await sleep(400 * (attempt + 1));
@@ -89,11 +131,11 @@ async function finalCheck(run, claim, incomplete = []) {
   loading('Checking the result', 'check');
   $('loading-label').textContent = 'Checking the result against the page';
   let shot = null;
-  try { shot = await send('observe', { tabId: run.actingTabId, activate: false }); } catch { /* the transcript still allows a report */ }
+  try { shot = await timed(send('observe', { tabId: run.actingTabId, activate: false }), 20000, 'The final check could not read the page.'); } catch { /* the transcript still allows a report */ }
   if (workflow !== run) return;
   let report;
   try {
-    report = await api('/review', {
+    report = await api('/review', { speed,
       goal: run.goal, claim: claim || '', todos: plan, steps: run.steps,
       url: shot?.url || run.view?.url, title: shot?.title, text: shot?.text || '',
       ...(shot ? { image: shot.image, width: shot.width, height: shot.height } : {})
@@ -220,6 +262,13 @@ function renderMessage(message) {
     if (message.excerpt) { const excerpt = document.createElement('p'); excerpt.textContent = `Read: ${message.excerpt}`; details.append(excerpt); }
     return details;
   }
+  // A finished thought is flat text, not a card: the shimmer belongs to the wait, not the result.
+  if (message.role === 'thought') {
+    const line = document.createElement('div');
+    line.className = 'thought';
+    line.textContent = message.text;
+    return line;
+  }
   if (message.role === 'report') return reportCard(message.report || {});
   const el = document.createElement('div');
   el.className = `message ${message.role}`;
@@ -325,7 +374,8 @@ function markdown(target) {
     if (message.role === 'activity') {
       const badges = `${message.failure ? ' (failed)' : message.changed === false ? ' (no visible change)' : ''}`;
       lines.push(`- ${message.type}${badges}: ${message.text}${message.page ? ` — ${message.page}` : ''}`);
-    } else if (message.role === 'note') lines.push(`> ${message.text}`);
+    } else if (message.role === 'thought') lines.push(`_${message.text}_`);
+    else if (message.role === 'note') lines.push(`> ${message.text}`);
     else lines.push(`**${message.role === 'user' ? 'You' : 'Webagent'}:** ${message.text}`, '');
   }
   return lines.join('\n');
@@ -341,15 +391,23 @@ function exportChat() {
 function stop() {
   workflow = null; proposal = null; currentAction(null);
   $('approval').hidden = true; $('stop').hidden = true; $('start').hidden = false;
-  $('goal').disabled = false; $('mode').disabled = false; $('loading').hidden = true;
-  setStatus('');
+  $('goal').disabled = false; $('loading').hidden = true;
   renderPlan(); renderSkillChip(); persist().catch(() => {});
 }
 function loading(label, icon = 'spinner-gap') {
-  $('loading-label').textContent = label;
+  // Only the word "Thinking" shimmers: it says the model is still working, and everything after it
+  // stays readable.
+  const box = $('loading-label');
+  const text = String(label || '');
+  const rest = text.startsWith('Thinking') ? text.slice(8) : '';
+  box.textContent = '';
+  if (rest) {
+    const word = document.createElement('span'); word.className = 'shimmer'; word.textContent = 'Thinking';
+    box.append(word, document.createTextNode(rest));
+  } else box.textContent = text;
   setIcon($('loading-icon'), icon, 17);
   $('loading-icon').classList.toggle('spin', icon === 'spinner-gap' || icon === 'circle-notch');
-  $('loading').hidden = false; setStatus(label);
+  $('loading').hidden = false;
 }
 function currentAction(label) {
   const existing = $('current-action');
@@ -373,6 +431,12 @@ function recordActivity(action, url, result, elapsed, failure, meta = {}) {
   $('steps').append(el);
   el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   persist().catch(() => {});
+}
+// How long the model thought, written once the answer is in. The shimmer is for the wait only.
+function thoughtFor(elapsed) {
+  const value = Number(elapsed) || 0;
+  if (value >= 1000) return `Thought for ${(value / 1000).toFixed(2)}s`;
+  return `Thought for ${Math.max(1, Math.round(value))}ms`;
 }
 function textHash(text) { const value = String(text || ''); let hash = 0; for (let i = 0; i < value.length; i += 5) hash = (hash * 31 + value.charCodeAt(i)) | 0; return `${value.length}:${hash}`; }
 function riskyAction(action) {
@@ -416,16 +480,26 @@ async function next(run, prefetched) {
   if (!acting) throw new Error('No open tab found. Open a webpage first.');
   if (!acting.supported) throw new Error('The acting tab is not supported. Pick an HTTPS page — Chrome internal pages are blocked.');
   run.actingTabId = acting.id;
-  const contexts = tabCache.filter(t => run.contextIds.includes(t.id) && t.id !== acting.id && t.supported).slice(0, 5);
+  // Context tabs keep the order the user attached them in, so the numbering the model gets last round still means the same tab.
+  const contexts = run.contextIds.map(id => tabCache.find(t => t.id === id)).filter(t => t && t.id !== acting.id && t.supported).slice(0, 5);
   try { await permission(); }
   catch (e) { if (workflow !== run) return; halt(run, e.message); return; }
   let shot = prefetched;
-  if (!shot) { loading(`Reading ${shortTitle(acting)}`, 'eye'); shot = await send('observe', { tabId: acting.id, activate: true }); if (workflow !== run) return; }
+  if (!shot) { loading(`Reading ${shortTitle(acting)}`, 'eye'); shot = await timed(send('observe', { tabId: acting.id, stayPut }), OBSERVE_TIMEOUT, `Reading ${shortTitle(acting)} took too long — the tab may be stuck or closed.`); if (workflow !== run) return; }
   const hash = textHash(shot.text);
   run.stalled = hash === run.lastHash ? (run.stalled || 0) + 1 : 0;
   run.apiRetries = 0;
   run.lastHash = hash;
-  const extra = (await Promise.all(contexts.map(t => send('context', { tabId: t.id }).then(c => c.text ? { url: c.url, title: c.title, text: c.text.slice(0, 4000) } : null).catch(() => null)))).filter(Boolean);
+  const read = await Promise.all(contexts.map(t => timed(send('context', { tabId: t.id }), 15000, 'The context tab did not answer.').then(c => c.text ? { id: t.id, url: c.url, title: c.title, text: c.text.slice(0, 12000) } : null).catch(() => null)));
+  const extra = read.filter(Boolean).map(c => ({ url: c.url, title: c.title, text: c.text }));
+  // A switch action names a tab by its position in this list, so the mapping must match the payload exactly.
+  run.contextTabs = read.filter(Boolean).map(c => c.id);
+  run.warned = run.warned || [];
+  for (const [index, tab] of contexts.entries()) {
+    if (read[index] || run.warned.includes(tab.id)) continue;
+    run.warned.push(tab.id);
+    pushMessage('note', `Could not read ${shortTitle(tab)} as context — it may have been closed or asleep.`);
+  }
   const image = $('screenshot'); image.src = `data:image/jpeg;base64,${shot.image}`; await image.decode();
   lastShot = `data:image/jpeg;base64,${shot.image}`;
   $('saw-image').src = lastShot; $('saw-btn').hidden = false;
@@ -440,13 +514,13 @@ async function next(run, prefetched) {
   // Vision is a fallback: it is only attached for thin trees or when the model asks for it.
   const sendImage = run.wantShot || refs.length < 15;
   const started = performance.now();
-  const { actions, action, completed, incomplete, memory, needScreenshot, ms } = await api('/agent', { goal:aimed(run), intent:[run.goal, ...plan.map(item => item.title)].join('\n'), todos:plan, steps:run.steps, url:shot.url, title:shot.title, text:shot.text, ...(sendImage ? { image: shot.image } : {}), width:image.naturalWidth, height:image.naturalHeight, elements, refs, tabs, memory: run.memory || undefined, stalled:run.stalled, automatic:run.mode === 'autopilot', correction: run.correction || undefined, contexts:extra });
-  if (memory) run.memory = memory;
+  const { actions, action, completed, incomplete, memory, needScreenshot, ms } = await api('/agent', { goal:aimed(run), speed, intent:[run.goal, ...plan.map(item => item.title)].join('\n'), todos:plan, steps:run.steps, url:shot.url, title:shot.title, text:shot.text, ...(sendImage ? { image: shot.image } : {}), width:image.naturalWidth, height:image.naturalHeight, elements, refs, tabs, memory: run.memory || undefined, stalled:run.stalled, automatic:run.mode === 'autopilot', correction: run.correction || undefined, contexts:extra });  if (memory) run.memory = memory;
   run.correction = '';
   if (needScreenshot && !run.wantShot) { run.wantShot = true; return next(run); }
   run.wantShot = false;
   const elapsed = ms ?? Math.round(performance.now() - started);
   if (workflow !== run) return;
+  pushMessage('thought', thoughtFor(elapsed));
   if (applyCompleted(run, completed)) persist().catch(() => {});
   if (run.unproven) { pushMessage('note', `${run.unproven} plan step${run.unproven === 1 ? '' : 's'} were claimed done without a verified action, so the tick waits until the work is proven.`); run.unproven = 0; }
   const batch = Array.isArray(actions) && actions.length ? actions : (action ? [action] : []);
@@ -469,7 +543,7 @@ async function next(run, prefetched) {
     if (risky) pushMessage('note', `Auto mode paused this step because ${risky}.`);
     await runBatch(run);
   } else {
-    $('approval').hidden = false; $('loading').hidden = true; setStatus('Waiting for you');
+    $('approval').hidden = false; $('loading').hidden = true;
     notify(risky ? `Paused before this round because ${risky}. Approve to continue.` : 'Review the queued actions before they run.');
   }
 }
@@ -477,24 +551,24 @@ async function runBatch(run) {
   while (run.queue.length && workflow === run) {
     const action = run.queue.shift();
     const outcome = await executeOne(run, showProposal(run, action, run.queue.length, true));
-    if (outcome === 'recover') { await sleep(300); if (workflow === run) await safeNext(run); return; }
+    if (outcome === 'recover') { await sleep(pace()); if (workflow === run) await safeNext(run); return; }
     if (outcome !== 'ok') {
       // Recover in place: re-observe and let the model pick a different route before giving up.
       if (outcome === 'failed' && run.mode !== 'manual' && (run.hardFails || 0) < 2) {
         run.hardFails = (run.hardFails || 0) + 1;
         pushMessage('note', 'That step kept failing, so I’ll look at the page again and try a different route.');
-        await sleep(700);
+        await sleep(pace() * 2);
         if (workflow === run) await safeNext(run);
         return;
       }
       halt(run, 'Stopped where the page would not accept the action. The task is back in the box to retry.');
       return;
     }
-    if (run.queue.length) { loading('Next queued action', '◌'); await sleep(220); }
+    if (run.queue.length) { loading('Next queued action', '◌'); await sleep(Math.round(pace() / 2)); }
   }
   if (workflow !== run) return;
   loading('Waiting for the page', '◌');
-  await sleep(600);
+  await sleep(pace());
   if (workflow !== run) return;
   await safeNext(run);
 }
@@ -505,7 +579,7 @@ async function safeNext(run) {
     if (run.mode !== 'manual' && (run.apiRetries || 0) < 2) {
       run.apiRetries = (run.apiRetries || 0) + 1;
       pushMessage('note', `${e.message} Retrying with a fresh look at the page.`);
-      await sleep(900);
+      await sleep(pace() * 2);
       if (workflow === run) return safeNext(run);
       return;
     }
@@ -546,23 +620,25 @@ async function actOnTabs(run, action) {
     const url = webTarget(action.url) || (action.query ? webTarget(`https://duckduckgo.com/?q=${encodeURIComponent(String(action.query).slice(0, 200))}`) : null);
     if (!url) throw new Error('That address is not an HTTPS page.');
     if ((run.opened || []).length >= 3) throw new Error('This task already opened three tabs. Use one of them, or focus a tab the user already has.');
-    const tab = await chrome.tabs.create({ url, active: true });
+    const tab = await chrome.tabs.create({ url, active: !stayPut });
     await waitForTab(tab.id);
     run.opened = [...(run.opened || []), tab.id];
     run.actingTabId = tab.id;
     send('group', { tabId: tab.id }).catch(() => {});
     run.allow = [...new Set([...run.allow, new URL(url).origin])];
-    pushMessage('note', `Opened ${hostOf(url)} in a new tab and switched to it.`);
+    pushMessage('note', stayPut ? `Opened ${hostOf(url)} in a new tab.` : `Opened ${hostOf(url)} in a new tab and switched to it.`);
     return { url, effect: { verified: true } };
   }
-  if (action.type === 'focus') {
+  if (action.type === 'switch') {
     const tab = tabByToken(run, action.tab);
     if (!tab.supported) throw new Error('That tab is a Chrome page the agent cannot drive. Pick another from the TABS list.');
-    await chrome.tabs.update(tab.id, { active: true });
-    await sleep(320);
+    const previous = run.actingTabId;
+    if (!stayPut) { await chrome.tabs.update(tab.id, { active: true }); await sleep(320); }
     run.actingTabId = tab.id;
+    // The tab it just left becomes readable context, which is what strings one run across tabs.
+    run.contextIds = [...new Set([...run.contextIds, previous])].filter(id => id !== tab.id).slice(0, 5);
     if (tab.url) run.allow = [...new Set([...run.allow, new URL(tab.url).origin])];
-    pushMessage('note', `Back in ${shortTitle(tab)}.`);
+    pushMessage('note', `Now working in ${shortTitle(tab)}.`);
     return { url: tab.url, effect: { verified: true } };
   }
   if (action.type === 'gather') {
@@ -605,12 +681,13 @@ async function executeOne(run, current) {
         pushMessage('note', `Extended this task to ${new URL(action.url).hostname}.`);
       }
     }
-    result = TAB_STEPS.has(action.type) ? await actOnTabs(run, action) : await send('act', { ...current, goal: run.goal, intent: [run.goal, ...plan.map(item => item.title)].join('\n'), allow: run.allow, automatic: run.mode === 'autopilot' });
-  }
+    result = TAB_STEPS.has(action.type) ? await actOnTabs(run, action) : await send('act', { ...current, settleMs: settleFor(), stayPut, goal: run.goal, intent: [run.goal, ...plan.map(item => item.title)].join('\n'), allow: run.allow, automatic: run.mode === 'autopilot' });  }
   catch (error) {
     if (workflow !== run) return 'stop';
+    // A rate-limited write or click is also just a pause: wait out the window, then look again.
+    if (isRateLimit(error.status, error.message) && cooldowns < COOLDOWN_LIMIT) { await cooldown(); return 'recover'; }
     if (error.code === 'PAGE_CHANGED' && (run.recovered || 0) < 2) { run.recovered = (run.recovered || 0) + 1; notify('The page shifted while acting. Re-reading it and trying again.'); return 'recover'; }
-    run.steps.push({ type: action.type, description: action.description || '', ok: false, changed: false, code: error.code || 'ERROR', note: error.message, page: current.url });
+    run.steps.push({ type: action.type, description: action.description || '', ok: false, changed: false, code: error.code || 'ERROR', note: error.message, page: current.url, ref: action.ref, x: current.action.x, y: current.action.y, url: action.url, direction: action.direction, text: action.type === 'type' ? action.text : undefined });
     recordActivity(action, current.url, {}, 0, `${error.message}${error.code ? ` [${error.code}]` : ''}`);
     currentAction(null);
     const label = `${error.message}${error.code ? ` (${error.code})` : ''}`;
@@ -645,19 +722,17 @@ async function startWorkflow(goal, skill) {
   // A clicked or named skill wins; otherwise a Google page plus summarising words picks it up by itself.
   const chosen = skill || builtinFor(acting.url, goal);
   chat.goal = goal; chat.title = goal.slice(0, 60);
-  workflow = { goal, skill: chosen || null, steps: [], mode, actingTabId: acting.id, homeTabId: acting.id, contextIds: [...contextIds], opened: [], tokens: {}, tokenSeq: 0, stalled: 0, lastHash: '', queue: [], evidence: 0, unproven: 0, recovered: 0, retries: 0, apiRetries: 0, keepGoing: 0, allow: [new URL(acting.url).origin], memory: null, wantShot: false };
-  const run = workflow;
+  workflow = { goal, skill: chosen || null, steps: [], mode, actingTabId: acting.id, homeTabId: acting.id, contextIds: [...contextIds], opened: [], tokens: {}, tokenSeq: 0, stalled: 0, lastHash: '', queue: [], evidence: 0, unproven: 0, recovered: 0, retries: 0, apiRetries: 0, keepGoing: 0, allow: [new URL(acting.url).origin], memory: null, wantShot: false, contextTabs: [], warned: [] };  const run = workflow;
   plan = [];
   pushMessage('user', goal);
   if (chosen) pushMessage('note', `Using the built-in “${chosen.name}” skill for this page.`);
   $('goal').value = ''; grow();
   renderSkillChip();
   $('suggest').hidden = true;
-  $('start').hidden = true; $('stop').hidden = false; $('goal').disabled = true; $('mode').disabled = true;
+  $('start').hidden = true; $('stop').hidden = false; $('goal').disabled = true;
   loading('Reading the page', 'eye');
-  send('group', { tabId: acting.id }).catch(() => {});
   try {
-    const observed = send('observe', { tabId: acting.id, activate: true });
+    const observed = timed(send('observe', { tabId: acting.id, stayPut }), OBSERVE_TIMEOUT, 'Reading the page took too long — the tab may be stuck or closed.');
     if (planMode === 'never') {
       const shot = await observed;
       if (workflow !== run) return;
@@ -665,18 +740,21 @@ async function startWorkflow(goal, skill) {
       await next(run, shot);
       return;
     }
-    const [planned, shot] = await Promise.allSettled([api('/plan', { goal: aimed(run), url: acting.url, title: acting.title }), observed]);
+    // A slow planner must not hold the whole run on "Reading the page": it gets a short budget and the
+    // page work starts with or without a checklist.
+    const [planned, shot] = await Promise.allSettled([timed(api('/plan', { goal: aimed(run), url: acting.url, title: acting.title }), PLAN_TIMEOUT, 'The planner did not answer in time.'), observed]);
     if (workflow !== run) return;
     if (shot.status === 'rejected') throw shot.reason;
     if (planned.status === 'fulfilled' && planned.value.todos?.length) plan = planned.value.todos;
     else if (planMode === 'always') plan = [{ id: '1', title: goal.slice(0, 140), done: false }];
+    else if (planned.status === 'rejected') pushMessage('note', 'No checklist this time — the planner was slow, so I went straight to the page.');
     else pushMessage('note', 'This task is short enough to run without a checklist.');
     renderPlan();
     persist().catch(() => {});
     await next(run, shot.value);
   } catch (e) {
     if (workflow !== run) return;
-    $('loading').hidden = true; setStatus('');
+    $('loading').hidden = true;
     throw e;
   }
 }
@@ -748,7 +826,7 @@ function renderSuggest() {
     ...skills.filter(skill => ('/' + skill.name).toLowerCase().replace(/[^a-z0-9/]+/g, '-').startsWith('/' + slash[1].toLowerCase())).map(skill => ({ label: '/' + skill.name, hint: skill.description || 'Run a saved skill', apply: () => { $('goal').value = skill.prompt || (skill.steps || []).join(' → '); hideSuggest(); notify('Skill loaded — send the message to run it.'); } })),
     ...BUILTIN_SKILLS.filter(skill => ('/' + skill.name).toLowerCase().replace(/[^a-z0-9/]+/g, '-').startsWith('/' + slash[1].toLowerCase())).map(skill => ({ label: '/' + skill.name, hint: skill.description, apply: () => { $('goal').value = skill.defaultGoal; grow(); hideSuggest(); notify(`Skill loaded — send it to run “${skill.name}”.`); } }))
   ];
-  else if (at) items = tabCache.filter(tab => tab.supported && tab.id !== actingTabId && shortTitle(tab).toLowerCase().includes(at[1].toLowerCase())).slice(0, 6).map(tab => ({ label: `@${shortTitle(tab)}`, hint: 'Add as read-only context', apply: () => { contextIds = [...new Set([...contextIds, tab.id])].slice(0, 5); renderTabs(); $('goal').value = value.replace(/(?:^|\s)@([^\s@]*)$/i, '').trim(); notify(`Added ${shortTitle(tab)} as context.`); hideSuggest(); } }));
+  else if (at) items = tabCache.filter(tab => tab.supported && tab.id !== actingTabId && `${shortTitle(tab)} ${tab.url} ${hostOf(tab.url)}`.toLowerCase().includes(at[1].toLowerCase())).slice(0, 6).map(tab => ({ label: `@${shortTitle(tab)}`, hint: `Add ${hostOf(tab.url)} as context`, apply: () => { contextIds = [...new Set([...contextIds, tab.id])].slice(0, 5); renderTabs(); $('goal').value = value.replace(/(?:^|\s)@([^\s@]*)$/i, '').trim(); notify(`Added ${shortTitle(tab)} as context.`); hideSuggest(); } }));
   box.textContent = '';
   if (!items.length) { hideSuggest(); return; }
   for (const item of items) {
@@ -772,7 +850,6 @@ $('composer').addEventListener('submit', async event => {
 $('goal').addEventListener('keydown', event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); $('composer').requestSubmit(); } });
 $('goal').addEventListener('input', () => { grow(); renderSuggest(); });
 $('goal').addEventListener('blur', () => setTimeout(hideSuggest, 150));
-$('mode').addEventListener('change', () => { mode = $('mode').value; chrome.storage.local.set({ mode }); notify(mode === 'autopilot' ? 'Autopilot: actions run without asking.' : mode === 'auto' ? 'Auto: runs freely but pauses before risky steps.' : 'Approve each round before it runs.'); });
 $('new-chat').addEventListener('click', () => { newChat().catch(e => notify(e.message || 'Could not start a chat.', true)); });
 $('history-btn').addEventListener('click', openHistory);
 $('history-close').addEventListener('click', event => { event.preventDefault(); $('history-dialog').close(); });
@@ -800,15 +877,38 @@ $('reject').addEventListener('click', () => { stop(); notify('Stopped without ta
 $('stop').addEventListener('click', () => { stop(); notify('Workflow stopped. An action already in progress may still finish.'); });
 $('worker').addEventListener('change', async () => { await chrome.storage.local.set({ worker: $('worker').value.trim().replace(/\/$/, '') }); });
 $('bridge-toggle').addEventListener('change', async () => { try { const out = await send('bridge', { on: $('bridge-toggle').checked }); notify(out.connected ? 'Bridge on. Start node bridge/server.mjs to accept MCP clients.' : 'Bridge off.'); } catch (e) { notify(e.message || 'Could not toggle the bridge.', true); } });
+$('pointer-toggle').addEventListener('change', async () => { await chrome.storage.local.set({ pointer: $('pointer-toggle').checked }); notify($('pointer-toggle').checked ? 'Pointer on: a purple cursor shows where the agent clicks.' : 'Pointer off.'); });
+$('speed').addEventListener('change', async () => {
+  const value = $('speed').value;
+  speed = Object.prototype.hasOwnProperty.call(PACING, value) ? value : 'fast';
+  await chrome.storage.local.set({ speed });
+  notify(`Speed: ${speed}. This applies from the next action.`);
+});
+$('slow-toggle').addEventListener('change', async () => {
+  slowPages = $('slow-toggle').checked;
+  await chrome.storage.local.set({ slowPages });
+  notify(slowPages ? 'Waiting up to four seconds for a slow menu before calling an action a failure.' : 'Deciding quickly. A slow menu may look like a failed click.');
+});
+$('stay-toggle').addEventListener('change', async () => {
+  stayPut = $('stay-toggle').checked;
+  await chrome.storage.local.set({ stayPut });
+  notify(stayPut ? 'Working in the background — switch tabs freely.' : 'Switching to the working tab before each action.');
+});
+chrome.runtime.onMessage.addListener(message => { if (message && message.type === 'pointerBlocked') notify('Pointer is on, but this page blocks the cursor overlay — the click still went ahead.', true); });
 
 (async () => {
-  const saved = await chrome.storage.local.get(['worker', 'chats', 'activeChat', 'mode', 'planMode', 'lastShot', 'skills', 'bridge']);
+  const saved = await chrome.storage.local.get(['worker', 'chats', 'activeChat', 'planMode', 'lastShot', 'skills', 'bridge', 'pointer', 'speed', 'slowPages', 'stayPut']);
   $('worker').value = saved.worker || 'https://webagent.amos-donn.workers.dev';
   skills = Array.isArray(saved.skills) ? saved.skills : [];
   $('bridge-toggle').checked = saved.bridge === true;
-  mode = ['manual', 'auto', 'autopilot'].includes(saved.mode) ? saved.mode : 'autopilot';
+  $('pointer-toggle').checked = saved.pointer !== false;
+  speed = Object.prototype.hasOwnProperty.call(PACING, saved.speed) ? saved.speed : 'fast';
+  slowPages = saved.slowPages === true;
+  $('speed').value = speed;
+  $('slow-toggle').checked = slowPages;
+  stayPut = saved.stayPut !== false;
+  $('stay-toggle').checked = stayPut;
   planMode = ['auto', 'always', 'never'].includes(saved.planMode) ? saved.planMode : 'auto';
-  $('mode').value = mode;
   lastShot = saved.lastShot || '';
   $('saw-btn').hidden = !lastShot;
   chats = Array.isArray(saved.chats) ? saved.chats : [];

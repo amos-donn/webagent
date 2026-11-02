@@ -175,23 +175,41 @@ async function saveRefs(tabId, url, refs) {
   await chrome.storage.session.set({ ['ax:' + tabId]: { url, refs: map, names, at: Date.now() } }).catch(() => {});
 }
 async function loadRefs(tabId) { const key = 'ax:' + tabId; return (await chrome.storage.session.get(key).catch(() => ({})))[key]; }
+async function measureNode(target, backend) {
+  await chrome.debugger.sendCommand(target, 'DOM.enable').catch(() => {});
+  const resolved = await chrome.debugger.sendCommand(target, 'DOM.resolveNode', { backendNodeId: backend }).catch(() => null);
+  if (!resolved?.object?.objectId) return null;
+  const { result } = await chrome.debugger.sendCommand(target, 'Runtime.callFunctionOn', {
+    objectId: resolved.object.objectId,
+    functionDeclaration: 'function(){ this.scrollIntoView({block:"center",inline:"center"}); const r=this.getBoundingClientRect(); return {x:r.left+r.width/2,y:r.top+r.height/2,w:r.width,h:r.height}; }',
+    returnByValue: true
+  }).catch(() => ({ result: null }));
+  return result?.value || null;
+}
+// A re-render replaces the node behind a ref, which used to cost a whole round of re-observation.
+// The role and name usually survive the re-render, so the same control is found again and used now.
+async function healRef(tabId, ref) {
+  const stored = await loadRefs(tabId);
+  const name = stored?.names?.[ref];
+  if (!name) return null;
+  const ax = await axSnapshot(tabId).catch(() => ({ refs: [] }));
+  const list = Array.isArray(ax?.refs) ? ax.refs : [];
+  const match = list.find(entry => `${entry.role} ${entry.name}`.trim() === name)
+    || list.find(entry => entry.name.length > 2 && name.endsWith(entry.name));
+  // Deliberately not saved: rewriting the ref map mid-action would renumber every other ref.
+  return match?.backend || null;
+}
 async function refBox(tabId, ref, expectedUrl) {
   const stored = await loadRefs(tabId);
   if (!stored || !stored.refs?.[ref]) fail('STALE_REF', 'That element reference is stale. Read the page again.');
   if (expectedUrl && !samePage(stored.url, expectedUrl)) fail('PAGE_CHANGED', 'That page changed. Observe it again.');
   const live = (await liveViewportSafe(tabId)) || { width: 1280, height: 800 };
-  const box = await debug(tabId, async target => {
-    await chrome.debugger.sendCommand(target, 'DOM.enable').catch(() => {});
-    const resolved = await chrome.debugger.sendCommand(target, 'DOM.resolveNode', { backendNodeId: stored.refs[ref] }).catch(() => null);
-    if (!resolved?.object?.objectId) fail('STALE_REF', 'That element is no longer on the page.');
-    const { result } = await chrome.debugger.sendCommand(target, 'Runtime.callFunctionOn', {
-      objectId: resolved.object.objectId,
-      functionDeclaration: 'function(){ this.scrollIntoView({block:"center",inline:"center"}); const r=this.getBoundingClientRect(); return {x:r.left+r.width/2,y:r.top+r.height/2,w:r.width,h:r.height}; }',
-      returnByValue: true
-    }).catch(() => ({ result: null }));
-    if (!result?.value) fail('NOT_ACTIONABLE', 'That element could not be measured.');
-    return result.value;
-  });
+  let box = await debug(tabId, target => measureNode(target, stored.refs[ref]));
+  if (!box || box.w < 2 || box.h < 2) {
+    const healed = await healRef(tabId, ref);
+    if (healed) box = await debug(tabId, target => measureNode(target, healed));
+  }
+  if (!box) fail('STALE_REF', 'That element is no longer on the page.');
   if (box.w < 2 || box.h < 2) fail('NOT_ACTIONABLE', 'That element is not visible right now.');
   return { x: box.x, y: box.y, width: live.width, height: live.height };
 }
@@ -214,22 +232,55 @@ function scalePoint(action, observedWidth, observedHeight, live) {
   const y = Math.min(Math.max(Math.round(action.y * scaleY), 0), Math.max(maxY, 0));
   return { x, y };
 }
-function pageSignature() {
+// Runs inside the page and keeps a mutation counter between calls, so "nothing has changed yet" can
+// be told apart from "the page is still busy". The signature itself never includes the counter.
+function pageWatched() {
   const text = document.body ? (document.body.innerText || '') : '';
   let hash = 0;
   for (let i = 0; i < text.length; i += 7) hash = (hash * 31 + text.charCodeAt(i)) | 0;
   const active = document.activeElement;
-  return `${location.href}|${text.length}|${hash}|${document.querySelectorAll('*').length}|${Math.round(scrollY)}|${active ? active.tagName : ''}`;
+  // The agent's own overlays (cursor, write box) are not page content: counting them would make a
+  // click look like it changed the page when only the overlay moved.
+  const sig = `${location.href}|${text.length}|${hash}|${document.querySelectorAll('*:not([id^="webagent-"])').length}|${Math.round(scrollY)}|${active ? active.tagName : ''}`;
+  const box = window.__webagentWatch || (window.__webagentWatch = { mutations: 0 });
+  if (!box.observer) {
+    box.mutations = 0;
+    box.observer = new MutationObserver(list => { box.mutations += list.length; });
+    box.observer.observe(document, { subtree: true, childList: true, attributes: true, characterData: true });
+  }
+  return { sig, mutations: box.mutations, dialogs: document.querySelectorAll('[role="dialog"],[aria-modal="true"]').length };
 }
-async function signature(tabId) {
-  try { const [{ result }] = await chrome.scripting.executeScript({ target: { tabId }, func: pageSignature }); return typeof result === 'string' ? result : ''; } catch { return ''; }
+async function watched(tabId) {
+  try {
+    const [{ result }] = await chrome.scripting.executeScript({ target: { tabId }, func: pageWatched });
+    return result && typeof result === 'object' ? result : null;
+  } catch { return null; }
 }
+async function signature(tabId) { const state = await watched(tabId); return state ? state.sig : ''; }
+// App pages open menus and dialogs a second or two after the click, and a check made after 1.2 seconds
+// reads that as a dead click. Wait for the page to go quiet instead: quiet plus a change is a finished
+// action, quiet plus no change is a real NO_EFFECT, and a busy page is given the time it needs.
+const SETTLE_MAX = 4000;
+// A fast run cannot spend four seconds per action waiting for a menu, so the panel sends a budget
+// with each action. The module keeps the current one rather than threading it through every call.
+let settleBudget = SETTLE_MAX;
 async function settle(tabId, before) {
-  let latest = before;
-  for (let attempt = 0; attempt < 6; attempt++) {
-    await sleep(200);
-    latest = await signature(tabId);
-    if (latest && before && latest !== before) return latest;
+  const span = Math.min(Math.max(Number(settleBudget) || SETTLE_MAX, 400), SETTLE_MAX);
+  let latest = before, lastMutations = -1, quiet = 0, changedAt = 0;
+  const deadline = Date.now() + span;
+  for (let attempt = 0; attempt < 40 && Date.now() < deadline; attempt++) {
+    await sleep(attempt < 2 ? 120 : 180);
+    const state = await watched(tabId);
+    // The tab was navigating or refused injection: the effect is unknown, not disproved.
+    if (!state) return '';
+    if (state.mutations !== lastMutations) { lastMutations = state.mutations; quiet = 0; } else quiet += 1;
+    latest = state.sig || latest;
+    const changed = !!before && !!state.sig && state.sig !== before;
+    if (changed && !changedAt) changedAt = Date.now();
+    // A live page (ticker, feed, animation) never goes fully quiet: report the change once it has
+    // settled for a moment instead of waiting out the whole window.
+    if (changed && (quiet >= 1 || Date.now() - changedAt > 1200)) return state.sig;
+    if (!changed && quiet >= 2 && attempt >= 2) return state.sig || latest;
   }
   return latest;
 }
@@ -341,6 +392,110 @@ async function typeKeys(target, text) {
     await chrome.debugger.sendCommand(target, 'Input.dispatchKeyEvent', { type: 'keyUp', key: char, windowsVirtualKeyCode: virtual });
   }
 }
+// A person watching the tab cannot tell where the agent is clicking: CDP input moves no real
+// pointer. So the cursor is drawn — a purple arrow that slides to the target and ripples where the
+// click lands. Presentation only; every call degrades silently and none of it changes the input.
+function pointerMove(x, y) {
+  const id = 'webagent-pointer';
+  let host = document.getElementById(id);
+  if (!host) {
+    host = document.createElement('div');
+    host.id = id;
+    host.style.cssText = 'position:fixed;left:0;top:0;width:0;height:0;overflow:visible;pointer-events:none;z-index:2147483647';
+    const root = host.attachShadow({ mode: 'open' });
+    const style = document.createElement('style');
+    style.textContent = '.wrap{position:fixed;left:0;top:0;width:0;height:0;will-change:transform}'
+      + '.arrow{position:absolute;left:-6.25px;top:-3.75px;width:30px;height:30px;transform-origin:6.25px 3.75px;filter:drop-shadow(0 2px 7px rgba(76,29,149,.55));opacity:0}'
+      + '.ring{position:absolute;left:-32px;top:-32px;width:64px;height:64px;border-radius:50%;border:2px solid rgba(168,85,247,.85);background:radial-gradient(circle,rgba(168,85,247,.3),rgba(168,85,247,0) 70%);opacity:0}';
+    const svg = 'http://www.w3.org/2000/svg';
+    const wrap = document.createElement('div'); wrap.className = 'wrap';
+    const ring = document.createElement('span'); ring.className = 'ring';
+    const arrow = document.createElementNS(svg, 'svg');
+    arrow.setAttribute('class', 'arrow'); arrow.setAttribute('viewBox', '0 0 24 24'); arrow.setAttribute('aria-hidden', 'true');
+    const shape = document.createElementNS(svg, 'path');
+    shape.setAttribute('d', 'M5 3 5 19.6 9.4 15.4 12.3 21.6 15.2 20.2 12.3 14.1 18.8 13.6 Z');
+    shape.setAttribute('fill', '#a855f7'); shape.setAttribute('stroke', '#fff');
+    shape.setAttribute('stroke-width', '1.4'); shape.setAttribute('stroke-linejoin', 'round');
+    arrow.append(shape);
+    wrap.append(ring, arrow);
+    root.append(style, wrap);
+    document.documentElement.appendChild(host);
+  }
+  const root = host.shadowRoot, wrap = root.querySelector('.wrap'), arrow = root.querySelector('.arrow');
+  const still = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const from = host.dataset.x ? { x: Number(host.dataset.x), y: Number(host.dataset.y) } : null;
+  host.dataset.x = String(Math.round(x));
+  host.dataset.y = String(Math.round(y));
+  const to = `translate3d(${Math.round(x)}px,${Math.round(y)}px,0)`;
+  if (!from) {
+    arrow.style.opacity = '1';
+    // First appearance: glide in from the nearest edge of the window, so the cursor looks like it
+    // entered the page rather than materialising on top of the thing it is about to click.
+    const width = (typeof innerWidth === 'number' && innerWidth) || document.documentElement.clientWidth || 1024;
+    const offscreen = still ? 26 : 72;
+    const startX = Math.round(x) < width / 2 ? -offscreen : width + offscreen;
+    const ms = still ? 120 : 380;
+    wrap.style.transform = to;
+    wrap.animate(
+      [{ transform: `translate3d(${startX}px,${Math.round(y)}px,0)` }, { transform: to }],
+      { duration: ms, easing: 'cubic-bezier(.22,.61,.36,1)', fill: 'forwards' }
+    ).finished.catch(() => {});
+    return ms;
+  }
+  // Reduced motion shortens the journey instead of removing it: a zero-length slide reads as "no
+  // cursor at all", which defeats the whole point of drawing one.
+  const distance = Math.hypot(x - from.x, y - from.y);
+  const ms = still
+    ? Math.min(110, Math.max(60, Math.round(distance * 0.25)))
+    : Math.min(360, Math.max(140, Math.round(distance * 0.9)));
+  arrow.style.opacity = '1';
+  wrap.animate(
+    [{ transform: `translate3d(${from.x}px,${from.y}px,0)` }, { transform: to }],
+    { duration: ms, easing: 'cubic-bezier(.22,.61,.36,1)', fill: 'forwards' }
+  ).finished.catch(() => {});
+  return ms;
+}
+function pointerPress() {
+  const host = document.getElementById('webagent-pointer');
+  const root = host && host.shadowRoot;
+  if (!root) return false;
+  const ring = root.querySelector('.ring'), arrow = root.querySelector('.arrow');
+  if (!ring || !arrow) return false;
+  if (matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    ring.animate([{ transform: 'scale(.35)', opacity: .9 }, { transform: 'scale(.85)', opacity: 0 }], { duration: 260, easing: 'ease-out' });
+    return true;
+  }
+  ring.animate(
+    [{ transform: 'scale(.2)', opacity: .9 }, { transform: 'scale(1)', opacity: 0 }],
+    { duration: 420, easing: 'cubic-bezier(.16,.8,.32,1)' }
+  );
+  // A press: the tip stays on the point while the body dips and springs back.
+  arrow.animate(
+    [{ transform: 'scale(1)' }, { transform: 'scale(.86)' }, { transform: 'scale(1)' }],
+    { duration: 190, easing: 'ease-out' }
+  );
+  return true;
+}
+async function pointerEnabled() {
+  const saved = await chrome.storage.local.get('pointer').catch(() => ({}));
+  return saved.pointer !== false;
+}
+let pointerTold = false;
+async function pointerTo(tabId, point) {
+  try {
+    const [{ result: ms }] = await chrome.scripting.executeScript({ target: { tabId }, func: pointerMove, args: [point.x, point.y] });
+    if (Number.isFinite(ms) && ms > 0) await sleep(Math.min(ms, 400));
+  } catch {
+    // Failing silently is why "I see no cursor" has no explanation. Say it once, then keep working.
+    if (!pointerTold) {
+      pointerTold = true;
+      chrome.runtime.sendMessage({ type: 'pointerBlocked' }).catch(() => {});
+    }
+  }
+}
+function pointerClick(tabId) {
+  chrome.scripting.executeScript({ target: { tabId }, func: pointerPress }).catch(() => {});
+}
 async function clickPoint(target, point) {
   await chrome.debugger.sendCommand(target, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x: point.x, y: point.y, button: 'none' });
   await chrome.debugger.sendCommand(target, 'Input.dispatchMouseEvent', { type: 'mousePressed', x: point.x, y: point.y, button: 'left', clickCount: 1 });
@@ -366,7 +521,9 @@ async function clickType(tab, action, width, height) {
   return debug(tab.id, async target => {
     const live = await liveViewport(target);
     const point = scalePoint(action, width, height, live);
+    if (await pointerEnabled()) await pointerTo(tab.id, point);
     await clickPoint(target, point);
+    pointerClick(tab.id);
     await sleep(120);
     if (action.type !== 'type') return {};
     const focused = await readEditable(tab.id);
@@ -386,7 +543,8 @@ async function clickType(tab, action, width, height) {
       return { typed: 'keys-after-insert', verified: null };
     }
     if (action.submit) { await sleep(150); await pressKey(target, 'Enter'); }
-    return { typed: 'insertText' };
+    // The field reports exactly the text that was sent: proof the step worked, whatever the page hash says.
+    return { typed: 'insertText', typedOk: after.kind === 'editable' ? after.value === action.text : null };
   });
 }
 async function workerBase() {
@@ -406,11 +564,13 @@ async function writeInto(fresh, action, message) {
   }
   const label = (action.ref ? await refLabel(fresh.id, action.ref) : '') || 'the field';
   const page = await readPage(fresh.id).catch(() => ({ text: '' }));
+  if (await pointerEnabled()) await pointerTo(fresh.id, point);
   await chrome.scripting.executeScript({ target: { tabId: fresh.id }, func: writeBoxShow, args: [point.x, point.y] }).catch(() => {});
   let produced = 0, failure = '';
   try {
     const outcome = await debug(fresh.id, async target => {
       await clickPoint(target, point);
+      pointerClick(fresh.id);
       await sleep(160);
       const focused = await readEditable(fresh.id);
       if (focused.password) fail('PASSWORD_FIELD', 'Password and login fields are blocked.');
@@ -493,6 +653,7 @@ async function guardAction(tabId, action, message) {
   return { notice: `“${clip(labels.join(' / ') || words[0] || action.type, 50)}” can be hard to undo, but it matches what you asked for — going ahead.` };
 }
 async function actOnTab(fresh, action, message) {
+  settleBudget = Number(message?.settleMs) || SETTLE_MAX;
   if (action.type === 'navigate') {
     const url = new URL(action.url);
     if (!permitted(url.href) || url.username || url.password) throw new Error('Only HTTPS or local URLs are allowed.');
@@ -545,6 +706,7 @@ async function actOnTab(fresh, action, message) {
     const extra = await clickType(fresh, { ...action, x: point.x, y: point.y }, point.width, point.height);
     let after = await settle(fresh.id, before);
     let verified = extra.verified !== undefined && extra.verified !== null ? extra.verified : (before && after ? before !== after : null);
+    if (extra.typedOk === true) verified = true;
     let fallback = false;
     if (action.type === 'click' && verified === false) {
       fallback = await clickElement(fresh.id, { x: point.x, y: point.y });
@@ -584,33 +746,36 @@ async function handle(message) {
     return { on: message.on === true, connected: !!bridgeSocket };
   }
   if (message.type === 'tabs') {
-    const tabs = await chrome.tabs.query({ currentWindow: true });
-    return { tabs: tabs.filter(t => t.id && t.url).map(t => ({ id: t.id, title: t.title || t.url, url: t.url, active: !!t.active, audible: !!t.audible, supported: permitted(t.url) })) };
-  }
-  if (message.type === 'group') {
-    try {
-      const existing = await chrome.tabs.get(message.tabId);
-      if (existing.groupId > 0) return { groupId: existing.groupId };
-      const groupId = await chrome.tabs.group({ tabIds: [message.tabId] });
-      await chrome.tabGroups.update(groupId, { title: 'webagent', color: 'blue' }).catch(() => {});
-      return { groupId };
-    } catch { return {}; }
+    // Every window, not just this one: the page you reference with @ is often in another window.
+    const tabs = await chrome.tabs.query({});
+    const [current] = await chrome.tabs.query({ active: true, lastFocusedWindow: true }).catch(() => []);
+    const here = current?.windowId;
+    const ordered = [...tabs].sort((a, b) => Number(b.windowId === here) - Number(a.windowId === here));
+    return { tabs: ordered.filter(t => t.id && t.url).map(t => ({ id: t.id, title: t.title || t.url, url: t.url, active: !!t.active && t.windowId === here, windowId: t.windowId, audible: !!t.audible, supported: permitted(t.url) })) };
   }
   if (message.type === 'context') {
     const tab = await getTab(message.tabId);
     if (!permitted(tab.url)) throw new Error('That page is not supported. Chrome internal pages are not supported.');
-    const page = await readPage(tab.id);
+    let page;
+    try { page = await readPage(tab.id); }
+    catch {
+      // A sleeping or long-backgrounded tab can refuse injection; waking it once usually fixes that.
+      await chrome.tabs.update(tab.id, { active: true }).catch(() => {});
+      await sleep(400);
+      page = await readPage(tab.id);
+    }
     return { tabId: tab.id, url: tab.url, title: page.title, text: page.text };
   }
   if (message.type === 'observe') {
     const tab = message.tabId ? await getTab(message.tabId) : (await chrome.tabs.query({ active: true, currentWindow: true }))[0];
     if (!tab?.id || !tab.url) throw new Error('Select a webpage first.');
     if (!permitted(tab.url)) throw new Error('Select an HTTPS page (or a local development page). Chrome internal pages are not supported.');
-    if (message.activate) { await chrome.tabs.update(tab.id, { active: true }); await sleep(350); }
+    if (message.stayPut === false && !tab.discarded) { await chrome.tabs.update(tab.id, { active: true }); await sleep(350); }
     const fresh = await getTab(tab.id);
     // Only one debugger session per tab at a time, so the screenshot and the tree are captured in series.
     const page = await readPage(fresh.id);
-    const shot = await shoot(fresh.id);
+    // A hidden tab can refuse a paint, and a missing screenshot is not a reason to drop the round.
+    const shot = await shoot(fresh.id).catch(() => ({}));
     const ax = await axSnapshot(fresh.id).catch(() => ({ refs: [], text: '' }));
     await saveRefs(fresh.id, fresh.url, ax.refs);
     return { tabId: fresh.id, url: fresh.url, title: page.title, text: page.text, elements: page.elements, refs: ax.refs.map(({ backend, ...rest }) => rest), ...shot };
@@ -623,8 +788,10 @@ async function handle(message) {
     const action = message.action;
     if (action?.type === 'think') return {};
     if (!action || !['click', 'type', 'write', 'read', 'scroll', 'wait', 'navigate', 'key', 'fill'].includes(action.type)) throw new Error('Unknown action.');
-    await chrome.tabs.update(tab.id, { active: true });
-    await sleep(250);
+    // Do not steal focus. Once the debugger is attached Chrome delivers input events and
+    // screenshots to a tab nobody is looking at, so the run can continue while you work elsewhere.
+    // A discarded tab has to be loaded before it can be driven, and that needs the tab shown.
+    if (message.stayPut === false || tab.discarded) { await chrome.tabs.update(tab.id, { active: true }); await sleep(250); }
     const fresh = await getTab(tab.id);
     if (!samePage(fresh.url, message.url)) fail('PAGE_CHANGED', 'That page changed. Observe it again.');
     return actOnTab(fresh, action, message);
