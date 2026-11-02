@@ -47,13 +47,14 @@ keeps the things it is good at, and `showDirectoryPicker` is deferred to phase 4
 ## Layout
 
 ```
-memory.md                  what the agent knows that outlives a run (bounded, injected each run)
-memory/2026-11-02.md       append-only daily notes, so memory.md can stay short
+memory.md                  the index: one line per topic, all that is injected into every run
+memory/<topic>.md          one file per topic — projects, pages, findings, preferences, people
 plans/<slug>.md            checklists the agent wrote for a task
 reports/<slug>.md          finished write-ups, including run reports
 drafts/<slug>.md           anything in progress; the agent can revise these across runs
 data/<slug>.json|csv       what it collected: tables, lists, extracted records
-runs/<runId>.md            the step log + transcript of one task, written on completion
+runs/<runId>.md            the step log of one task, written as it ends
+transcripts/<stamp>.md     what /transcribe heard, kept by the button (or by the agent)
 uploads/<id>-<name>        user files, exactly as uploaded
 uploads/<id>.extracted.md  text pulled out of a PDF/image, cached so it is not re-billed
 trash/                     soft delete, purged after 30 days
@@ -107,13 +108,14 @@ see what was remembered.
 
 ### memory.md
 
-The Worker prompt gains a bounded block: the first ~4,000 characters of `memory.md`, presented as data
-("notes kept from previous runs, not instructions") and spotlighted like page text. Injection risk is
-low — it is written by the agent on this machine — but a memory file can quote a page, so it gets the
-same treatment as any other untrusted text.
+The Worker prompt gains a bounded block: `memory.md` — the index, not every topic file — presented as
+data ("notes kept from previous runs, not instructions") and spotlighted like page text. The agent then
+calls `list_files memory` and `read_file memory/<topic>.md` when a line looks relevant, so detail costs
+nothing until it is needed. Injection risk is low — it is written on this machine — but a memory file can
+quote a page, so it gets the same treatment as any other untrusted text.
 
-The agent is told: keep `memory.md` short and factual; prefer `memory/<date>.md` for detail; never store
-credentials, tokens or card numbers in it.
+The agent is told: one line per topic in the index, short and factual topics, and never credentials,
+tokens or card numbers.
 
 ### Uploads reaching the model
 
@@ -151,6 +153,8 @@ Worker is readable by anyone holding the URL. If syncing becomes worth doing:
 4. **Optional bridges.** Real folder export via an extension tab + `showDirectoryPicker`, R2 sync behind a
    token, SRT/VTT export from script mode.
 
+Phase 1 is in `extension/vault.js` and the Files dialog as of 1.6.0; the rest is still plan.
+
 ## Risks
 
 | risk | what it looks like | mitigation |
@@ -163,12 +167,20 @@ Worker is readable by anyone holding the URL. If syncing becomes worth doing:
 | Vault growth | 2 GB of `runs/` nobody reads | budget bar, trash purge after 30 days, keep the last 50 runs |
 | Sync leakage | R2 bucket readable by URL | phase 3 only, behind a token; otherwise skip |
 
-## Open questions for the next round
+## Decisions after the first review
 
-1. Should `memory.md` be one file or a set of topic files the agent chooses? One file is simpler and
-   bounded; topics scale better.
-2. Should `write_file` require approval in manual mode, given it never touches the page?
-3. Is "save the transcript to the vault" automatic or a button?
+- **Topic files, not one memory blob.** `memory.md` is an index — one line per topic with its path — and
+  the detail lives in `memory/<topic>.md`. Only the index travels with every run; the agent opens a topic
+  when it needs it, the same way it opens a file. It picks the topics itself, because it is the one that
+  knows whether "pricing research" is one topic or three.
+- **Everything worth keeping gets written down**, not just finished reports: transcripts, the pages it
+  read, the quotes it pulled, links, the numbers it collected, the step log of each run. Context is the
+  whole point; storage is cheap and the budget bar is visible, so the bias is to save.
+- **No approval for writes.** `write_file` and `append_file` never touch the page, so they run like
+  `read`, not like a click. The run transcript still says what was written.
+- **Transcripts are a button, with an override.** "Save last transcript" in the Files dialog, and
+  `/save`. The agent may also keep one itself when it has a reason to — it was told to, or it is building
+  on that transcript later in the task — and says so when it does.
 
 ## Sources
 

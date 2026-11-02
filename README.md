@@ -120,6 +120,23 @@ Recording follows you across tabs. If the task continues in another tab — a li
 
 **Keystrokes are steps only when repeating them does the same thing.** Enter in a field is recorded, because it submits the form; Escape is recorded, because it closes a dialog; and so are Ctrl/Cmd + A, C, V, X, Z and Y when the page rather than a field has focus. Pressing Ctrl+V *inside* a field is deliberately not a step — the pasted text is already that field's recorded value, and replaying the paste would insert whatever happens to be on the clipboard at that moment. The same reasoning covers Ctrl+A-then-type, Ctrl+X and Ctrl+Z in a field: the value after them is what gets stored. Tab, the arrow keys, Home/End and PageUp/PageDown are not recorded at all, since the next step names its own element and a recorded target is scrolled into view before it is used. A macro recorded on a Mac stores and shows Cmd; on Windows and Linux, Ctrl.
 
+## The vault: memory, reports, and files you upload
+
+Every install has a small filesystem of its own — no folder picker, no permission prompt, nothing to
+configure. The agent keeps notes in `memory/` (one file per topic, with `memory.md` as the index), writes
+`plans/`, `reports/` and `drafts/` as it works, drops what it collected in `data/`, and leaves the step
+log of a run in `runs/`. Files you upload land in `uploads/` untouched, and transcripts you keep go in
+`transcripts/`.
+
+Open it with `/files`: browse the folders, preview or download anything, upload with the button or by
+dropping files onto the dialog, and see how much space the vault is using. `/save` puts the last
+transcript in `transcripts/`.
+
+It is the Origin Private File System, which Chrome already gives extensions, and `unlimitedStorage` (in
+the manifest from the first version) exempts it from the storage quota and from eviction. Nothing in it
+leaves the machine unless a step explicitly sends it to the Worker, and clearing browsing data does not
+clear it — uninstalling does. Text files cap at 25 MB per upload and 2 MB per written note.
+
 ## Transcribing a video's audio
 
 `/transcribe` reads the audio of the `<video>` or `<audio>` element on the page you are on, sends it to Gemini in ten-second slices, and puts the transcript in the chat and in a `.txt` download. Nothing is fetched from the site and no media file is stored: the element's own track is captured with `captureStream` while it plays, which is the only path that works for a player that streams through MediaSource and never exposes a file. The agent can do this itself, so "what did they say in this talk" works as a normal goal: it gets a `transcribe` action that returns the transcript as the step result, and it is told to use it rather than answer from a video's title or description. Ask it, or press `/transcribe` yourself — both run the same capture.

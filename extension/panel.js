@@ -637,7 +637,7 @@ function renderHistory() {
   }
 }
 function download(name, text, type = 'text/markdown') {
-  const blob = new Blob([text], { type });
+  const blob = text instanceof Blob ? text : new Blob([text], { type });
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
   link.href = url; link.download = name;
@@ -1256,6 +1256,7 @@ async function transcribeCommand() {
 function deliverTranscript(result) {
   const text = result?.text || '';
   const words = result?.words || (text ? text.split(/\s+/).length : 0);
+  lastTranscript = text;
   if (!text) { notify(result?.error || 'No speech was found in that audio.', true); return; }
   pushMessage('assistant', text);
   download(`mezze-transcript-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.txt`, text, 'text/plain');
@@ -1342,6 +1343,197 @@ async function stopTranscribe() {
   send('player-idle', { tabId: run.tabId }).catch(() => {});
 }
 
+/* ---------- the vault: memory, files, uploads ---------- */
+let lastTranscript = '';
+let vaultDir = 'memory';
+
+function filesDialog() {
+  let dialog = $('files-dialog');
+  if (dialog) return dialog;
+  dialog = document.createElement('dialog');
+  dialog.id = 'files-dialog';
+  dialog.className = 'files-dialog';
+
+  const head = document.createElement('header');
+  head.className = 'files-head';
+  const title = document.createElement('h2');
+  title.textContent = 'Files';
+  const usage = document.createElement('span');
+  usage.className = 'files-usage';
+  usage.id = 'files-usage';
+  const close = document.createElement('button');
+  close.type = 'button';
+  close.className = 'files-close';
+  close.textContent = 'Close';
+  close.addEventListener('click', () => dialog.close());
+  head.append(title, usage, close);
+
+  const bar = document.createElement('div');
+  bar.className = 'files-bar';
+  bar.id = 'files-bar';
+
+  const tools = document.createElement('div');
+  tools.className = 'files-tools';
+  const upload = document.createElement('button');
+  upload.type = 'button';
+  upload.className = 'files-btn';
+  upload.textContent = 'Upload files';
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.multiple = true;
+  input.hidden = true;
+  const save = document.createElement('button');
+  save.type = 'button';
+  save.className = 'files-btn';
+  save.textContent = 'Save last transcript';
+  upload.addEventListener('click', () => input.click());
+  input.addEventListener('change', () => { const picked = [...input.files]; input.value = ''; uploadToVault(picked).catch(e => notify(e.message || 'That upload did not work.', true)); });
+  save.addEventListener('click', () => saveTranscript().catch(e => notify(e.message || 'Could not save that transcript.', true)));
+  tools.append(upload, input, save);
+
+  const list = document.createElement('div');
+  list.className = 'files-list';
+  list.id = 'files-list';
+
+  const preview = document.createElement('pre');
+  preview.className = 'files-preview';
+  preview.id = 'files-preview';
+  preview.hidden = true;
+
+  dialog.append(head, bar, tools, list, preview);
+  dialog.addEventListener('click', event => { if (event.target === dialog) dialog.close(); });
+  dialog.addEventListener('dragover', event => event.preventDefault());
+  dialog.addEventListener('drop', event => {
+    event.preventDefault();
+    const dropped = [...(event.dataTransfer?.files || [])];
+    if (dropped.length) uploadToVault(dropped).catch(e => notify(e.message || 'That upload did not work.', true));
+  });
+  document.body.append(dialog);
+  return dialog;
+}
+
+async function openFiles(dir = vaultDir) {
+  const dialog = filesDialog();
+  vaultDir = Vault.DIRS.includes(dir) ? dir : 'memory';
+  if (!dialog.open) dialog.showModal();
+  await renderFiles();
+}
+
+async function renderFiles() {
+  const bar = $('files-bar');
+  const list = $('files-list');
+  if (!bar || !list) return;
+  bar.replaceChildren(...Vault.DIRS.map(dir => {
+    const tab = document.createElement('button');
+    tab.type = 'button';
+    tab.className = `files-tab${dir === vaultDir ? ' on' : ''}`;
+    tab.textContent = dir;
+    tab.addEventListener('click', () => {
+      vaultDir = dir;
+      const preview = $('files-preview');
+      if (preview) preview.hidden = true;
+      renderFiles().catch(() => {});
+    });
+    return tab;
+  }));
+
+  list.replaceChildren();
+  let entries = [];
+  try { entries = await Vault.list(vaultDir); } catch (error) { notify(error.message || 'Could not read the vault.', true); }
+  const files = entries.filter(entry => entry.kind !== 'directory');
+  if (!files.length) {
+    const empty = document.createElement('p');
+    empty.className = 'files-empty';
+    empty.textContent = vaultDir === 'uploads'
+      ? 'Nothing uploaded yet. Use Upload files, or drop a file on this window.'
+      : 'Nothing here yet. The agent writes this folder as it works.';
+    list.append(empty);
+  }
+  for (const entry of files) {
+    const row = document.createElement('div');
+    row.className = 'files-row';
+    const name = document.createElement('button');
+    name.type = 'button';
+    name.className = 'files-name';
+    name.textContent = entry.name;
+    name.title = entry.path;
+    name.addEventListener('click', () => previewFile(entry.path).catch(e => notify(e.message || 'Could not open that file.', true)));
+    const meta = document.createElement('span');
+    meta.className = 'files-meta';
+    meta.textContent = `${Vault.humanSize(entry.bytes)} · ${new Date(entry.at || Date.now()).toLocaleDateString()}`;
+    const get = document.createElement('button');
+    get.type = 'button';
+    get.className = 'files-act';
+    get.textContent = 'Download';
+    get.addEventListener('click', () => fetchFromVault(entry.path).catch(e => notify(e.message || 'Could not read that file.', true)));
+    const drop = document.createElement('button');
+    drop.type = 'button';
+    drop.className = 'files-act danger';
+    drop.textContent = 'Delete';
+    drop.addEventListener('click', () => deleteFromVault(entry.path).catch(e => notify(e.message || 'Could not delete that file.', true)));
+    row.append(name, meta, get, drop);
+    list.append(row);
+  }
+
+  const usage = $('files-usage');
+  if (usage) {
+    try { const totals = await Vault.usage(); usage.textContent = `${Vault.humanSize(totals.used)} used`; } catch { usage.textContent = ''; }
+  }
+}
+
+async function previewFile(path) {
+  const preview = $('files-preview');
+  if (!preview) return;
+  if (!Vault.isText(path)) {
+    preview.hidden = false;
+    preview.textContent = 'A binary file. Download it to open it outside Mezze.';
+    return;
+  }
+  const text = await Vault.readText(path);
+  preview.hidden = false;
+  preview.textContent = text.length > 60000 ? `${text.slice(0, 60000)}\n\n… ${Vault.humanSize(text.length)} in all — download it to read the rest.` : (text || '(empty)');
+}
+
+async function uploadToVault(picked = []) {
+  if (!picked.length) return;
+  let saved = 0;
+  for (const file of picked) {
+    if (file.size > Vault.MAX_UPLOAD) { notify(`${file.name} is larger than ${Vault.humanSize(Vault.MAX_UPLOAD)}.`, true); continue; }
+    const dot = file.name.lastIndexOf('.');
+    const ext = dot > 0 ? file.name.slice(dot).toLowerCase().replace(/[^.a-z0-9]/g, '') : '';
+    const base = dot > 0 ? file.name.slice(0, dot) : file.name;
+    await Vault.writeBlob(`uploads/${Date.now()}-${Vault.slug(base, 40)}${ext}`, file);
+    saved += 1;
+  }
+  if (saved) {
+    vaultDir = 'uploads';
+    notify(`${saved} file${saved === 1 ? '' : 's'} saved to the vault.`);
+  }
+  await renderFiles();
+}
+
+async function fetchFromVault(path) {
+  const blob = await Vault.readBlob(path);
+  download(path.split('/').pop(), blob, blob.type || 'application/octet-stream');
+}
+
+async function deleteFromVault(path) {
+  if (!confirm(`Delete ${path}? This cannot be undone.`)) return;
+  await Vault.remove(path);
+  notify(`Deleted ${path}.`);
+  await renderFiles();
+}
+
+async function saveTranscript() {
+  if (!lastTranscript) { notify('No transcript yet — transcribe a video first.', true); return; }
+  const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+  const path = `transcripts/${stamp}.md`;
+  await Vault.writeText(path, lastTranscript);
+  vaultDir = 'transcripts';
+  notify(`Transcript saved to ${path}.`);
+  await renderFiles();
+}
+
 const COMMANDS = [
   { cmd: '/new', hint: 'Start a fresh chat', run: () => newChat() },
   { cmd: '/chats', hint: 'Open chat history', run: () => openHistory() },
@@ -1354,6 +1546,8 @@ const COMMANDS = [
   { cmd: '/macros', hint: 'Open recorded macros', run: () => openMacros() },
   { cmd: '/transcribe', hint: 'Transcribe the audio of the video on this page', run: () => transcribeCommand().catch(e => notify(e.message || 'Could not transcribe this page.', true)) },
   { cmd: '/script', hint: 'Show the floating transcript player on this page', run: () => openScript().catch(e => notify(e.message || 'Could not open script mode.', true)) },
+  { cmd: '/files', hint: 'Open the local vault: memory, reports, uploads', run: () => openFiles().catch(e => notify(e.message || 'Could not open the vault.', true)) },
+  { cmd: '/save', hint: 'Save the last transcript to the vault', run: () => saveTranscript().catch(e => notify(e.message || 'Could not save that transcript.', true)) },
   { cmd: '/saw', hint: 'Show the screenshot behind the last step', run: () => openSaw() },
   { cmd: '/timings', hint: 'Open the speed panel', run: () => openTimings() },
   { cmd: '/stop', hint: 'Stop the running workflow', run: () => { stop(); notify('Workflow stopped.'); } }

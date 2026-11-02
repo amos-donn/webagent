@@ -435,3 +435,40 @@ dialog[open] { animation:pop .18s ease both }
 @keyframes sheen { 0% { background-position:120% 0 } 100% { background-position:-120% 0 } }
 @keyframes text-shimmer { from { background-position:100% 0 } to { background-position:-100% 0 } }
 @keyframes pop { from { opacity:0; transform:scale(.985) } to { opacity:1; transform:none } }
+
+/* ── the vault: files, uploads, memory ──────────────────────────────── */
+.files-dialog {
+  width:min(660px, 94vw); max-height:80vh; padding:0; border:1px solid var(--line); border-radius:var(--radius-lg);
+  background:var(--surface); color:var(--ink); box-shadow:var(--shadow-lg); overflow:hidden;
+  display:flex; flex-direction:column;
+}
+.files-dialog[open] { display:flex }
+.files-dialog::backdrop { background:rgba(11,11,14,.42); backdrop-filter:blur(2px) }
+.files-head { display:flex; align-items:center; gap:10px; padding:13px 15px; border-bottom:1px solid var(--line); background:var(--surface) }
+.files-head h2 { flex:1; margin:0; font-size:13px; font-weight:600; letter-spacing:-.01em }
+.files-usage { font-size:11px; color:var(--muted); font-variant-numeric:tabular-nums }
+.files-close { padding:4px 8px; border:1px solid var(--line); border-radius:var(--radius-sm); color:var(--muted); font-size:11px }
+.files-close:hover { color:var(--ink); border-color:var(--line-strong) }
+.files-bar { display:flex; gap:6px; padding:10px 15px 0; overflow-x:auto; scrollbar-width:none }
+.files-bar::-webkit-scrollbar { display:none }
+.files-tab { flex:none; padding:4px 9px; border:1px solid transparent; border-radius:999px; font-size:11.5px; color:var(--muted) }
+.files-tab:hover { color:var(--ink); background:var(--surface-2) }
+.files-tab.on { color:var(--accent-ink); background:var(--accent-soft); border-color:var(--accent-line) }
+.files-tools { display:flex; gap:6px; padding:10px 15px; flex-wrap:wrap }
+.files-btn { padding:5px 10px; border:1px solid var(--line); border-radius:var(--radius-sm); background:var(--surface); font-size:11.5px; color:var(--ink-2) }
+.files-btn:hover { border-color:var(--line-strong); color:var(--ink) }
+.files-list { flex:1; min-height:120px; overflow:auto; padding:0 15px 12px; display:flex; flex-direction:column; gap:2px }
+.files-row { display:grid; grid-template-columns:1fr auto auto auto; align-items:center; gap:8px; padding:6px 8px; border-radius:var(--radius-sm) }
+.files-row:hover { background:var(--surface-2) }
+.files-name { text-align:left; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:12px; color:var(--ink) }
+.files-name:hover { color:var(--accent-ink) }
+.files-meta { font-size:10.5px; color:var(--faint); font-variant-numeric:tabular-nums; white-space:nowrap }
+.files-act { font-size:10.5px; color:var(--muted); padding:2px 6px; border-radius:4px }
+.files-act:hover { color:var(--ink); background:var(--surface-3) }
+.files-act.danger:hover { color:var(--bad) }
+.files-empty { margin:8px 0; font-size:11.5px; color:var(--faint); line-height:1.6 }
+.files-preview {
+  margin:0; padding:12px 15px 16px; border-top:1px solid var(--line); max-height:42vh; overflow:auto;
+  white-space:pre-wrap; word-break:break-word; font:11.5px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color:var(--ink-2); background:var(--surface-2);
+}
