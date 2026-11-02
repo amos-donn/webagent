@@ -215,6 +215,13 @@ function renderMessage(message) {
     if (message.excerpt) { const excerpt = document.createElement('p'); excerpt.textContent = `Read: ${message.excerpt}`; details.append(excerpt); }
     return details;
   }
+  // A finished thought is flat text, not a card: the shimmer belongs to the wait, not the result.
+  if (message.role === 'thought') {
+    const line = document.createElement('div');
+    line.className = 'thought';
+    line.textContent = message.text;
+    return line;
+  }
   if (message.role === 'report') return reportCard(message.report || {});
   const el = document.createElement('div');
   el.className = `message ${message.role}`;
@@ -320,7 +327,8 @@ function markdown(target) {
     if (message.role === 'activity') {
       const badges = `${message.failure ? ' (failed)' : message.changed === false ? ' (no visible change)' : ''}`;
       lines.push(`- ${message.type}${badges}: ${message.text}${message.page ? ` — ${message.page}` : ''}`);
-    } else if (message.role === 'note') lines.push(`> ${message.text}`);
+    } else if (message.role === 'thought') lines.push(`_${message.text}_`);
+    else if (message.role === 'note') lines.push(`> ${message.text}`);
     else lines.push(`**${message.role === 'user' ? 'You' : 'Webagent'}:** ${message.text}`, '');
   }
   return lines.join('\n');
@@ -340,7 +348,16 @@ function stop() {
   renderPlan(); renderSkillChip(); persist().catch(() => {});
 }
 function loading(label, icon = 'spinner-gap') {
-  $('loading-label').textContent = label;
+  // Only the word "Thinking" shimmers: it says the model is still working, and everything after it
+  // stays readable.
+  const box = $('loading-label');
+  const text = String(label || '');
+  const rest = text.startsWith('Thinking') ? text.slice(8) : '';
+  box.textContent = '';
+  if (rest) {
+    const word = document.createElement('span'); word.className = 'shimmer'; word.textContent = 'Thinking';
+    box.append(word, document.createTextNode(rest));
+  } else box.textContent = text;
   setIcon($('loading-icon'), icon, 17);
   $('loading-icon').classList.toggle('spin', icon === 'spinner-gap' || icon === 'circle-notch');
   $('loading').hidden = false;
@@ -367,6 +384,12 @@ function recordActivity(action, url, result, elapsed, failure, meta = {}) {
   $('steps').append(el);
   el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   persist().catch(() => {});
+}
+// How long the model thought, written once the answer is in. The shimmer is for the wait only.
+function thoughtFor(elapsed) {
+  const value = Number(elapsed) || 0;
+  if (value >= 1000) return `Thought for ${(value / 1000).toFixed(2)}s`;
+  return `Thought for ${Math.max(1, Math.round(value))}ms`;
 }
 function textHash(text) { const value = String(text || ''); let hash = 0; for (let i = 0; i < value.length; i += 5) hash = (hash * 31 + value.charCodeAt(i)) | 0; return `${value.length}:${hash}`; }
 function riskyAction(action) {
@@ -450,6 +473,7 @@ async function next(run, prefetched) {
   run.wantShot = false;
   const elapsed = ms ?? Math.round(performance.now() - started);
   if (workflow !== run) return;
+  pushMessage('thought', thoughtFor(elapsed));
   if (applyCompleted(run, completed)) persist().catch(() => {});
   if (run.unproven) { pushMessage('note', `${run.unproven} plan step${run.unproven === 1 ? '' : 's'} were claimed done without a verified action, so the tick waits until the work is proven.`); run.unproven = 0; }
   const batch = Array.isArray(actions) && actions.length ? actions : (action ? [action] : []);

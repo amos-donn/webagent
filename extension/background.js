@@ -175,23 +175,41 @@ async function saveRefs(tabId, url, refs) {
   await chrome.storage.session.set({ ['ax:' + tabId]: { url, refs: map, names, at: Date.now() } }).catch(() => {});
 }
 async function loadRefs(tabId) { const key = 'ax:' + tabId; return (await chrome.storage.session.get(key).catch(() => ({})))[key]; }
+async function measureNode(target, backend) {
+  await chrome.debugger.sendCommand(target, 'DOM.enable').catch(() => {});
+  const resolved = await chrome.debugger.sendCommand(target, 'DOM.resolveNode', { backendNodeId: backend }).catch(() => null);
+  if (!resolved?.object?.objectId) return null;
+  const { result } = await chrome.debugger.sendCommand(target, 'Runtime.callFunctionOn', {
+    objectId: resolved.object.objectId,
+    functionDeclaration: 'function(){ this.scrollIntoView({block:"center",inline:"center"}); const r=this.getBoundingClientRect(); return {x:r.left+r.width/2,y:r.top+r.height/2,w:r.width,h:r.height}; }',
+    returnByValue: true
+  }).catch(() => ({ result: null }));
+  return result?.value || null;
+}
+// A re-render replaces the node behind a ref, which used to cost a whole round of re-observation.
+// The role and name usually survive the re-render, so the same control is found again and used now.
+async function healRef(tabId, ref) {
+  const stored = await loadRefs(tabId);
+  const name = stored?.names?.[ref];
+  if (!name) return null;
+  const ax = await axSnapshot(tabId).catch(() => ({ refs: [] }));
+  const list = Array.isArray(ax?.refs) ? ax.refs : [];
+  const match = list.find(entry => `${entry.role} ${entry.name}`.trim() === name)
+    || list.find(entry => entry.name.length > 2 && name.endsWith(entry.name));
+  // Deliberately not saved: rewriting the ref map mid-action would renumber every other ref.
+  return match?.backend || null;
+}
 async function refBox(tabId, ref, expectedUrl) {
   const stored = await loadRefs(tabId);
   if (!stored || !stored.refs?.[ref]) fail('STALE_REF', 'That element reference is stale. Read the page again.');
   if (expectedUrl && !samePage(stored.url, expectedUrl)) fail('PAGE_CHANGED', 'That page changed. Observe it again.');
   const live = (await liveViewportSafe(tabId)) || { width: 1280, height: 800 };
-  const box = await debug(tabId, async target => {
-    await chrome.debugger.sendCommand(target, 'DOM.enable').catch(() => {});
-    const resolved = await chrome.debugger.sendCommand(target, 'DOM.resolveNode', { backendNodeId: stored.refs[ref] }).catch(() => null);
-    if (!resolved?.object?.objectId) fail('STALE_REF', 'That element is no longer on the page.');
-    const { result } = await chrome.debugger.sendCommand(target, 'Runtime.callFunctionOn', {
-      objectId: resolved.object.objectId,
-      functionDeclaration: 'function(){ this.scrollIntoView({block:"center",inline:"center"}); const r=this.getBoundingClientRect(); return {x:r.left+r.width/2,y:r.top+r.height/2,w:r.width,h:r.height}; }',
-      returnByValue: true
-    }).catch(() => ({ result: null }));
-    if (!result?.value) fail('NOT_ACTIONABLE', 'That element could not be measured.');
-    return result.value;
-  });
+  let box = await debug(tabId, target => measureNode(target, stored.refs[ref]));
+  if (!box || box.w < 2 || box.h < 2) {
+    const healed = await healRef(tabId, ref);
+    if (healed) box = await debug(tabId, target => measureNode(target, healed));
+  }
+  if (!box) fail('STALE_REF', 'That element is no longer on the page.');
   if (box.w < 2 || box.h < 2) fail('NOT_ACTIONABLE', 'That element is not visible right now.');
   return { x: box.x, y: box.y, width: live.width, height: live.height };
 }
@@ -214,24 +232,51 @@ function scalePoint(action, observedWidth, observedHeight, live) {
   const y = Math.min(Math.max(Math.round(action.y * scaleY), 0), Math.max(maxY, 0));
   return { x, y };
 }
-function pageSignature() {
+// Runs inside the page and keeps a mutation counter between calls, so "nothing has changed yet" can
+// be told apart from "the page is still busy". The signature itself never includes the counter.
+function pageWatched() {
   const text = document.body ? (document.body.innerText || '') : '';
   let hash = 0;
   for (let i = 0; i < text.length; i += 7) hash = (hash * 31 + text.charCodeAt(i)) | 0;
   const active = document.activeElement;
   // The agent's own overlays (cursor, write box) are not page content: counting them would make a
   // click look like it changed the page when only the overlay moved.
-  return `${location.href}|${text.length}|${hash}|${document.querySelectorAll('*:not([id^="webagent-"])').length}|${Math.round(scrollY)}|${active ? active.tagName : ''}`;
+  const sig = `${location.href}|${text.length}|${hash}|${document.querySelectorAll('*:not([id^="webagent-"])').length}|${Math.round(scrollY)}|${active ? active.tagName : ''}`;
+  const box = window.__webagentWatch || (window.__webagentWatch = { mutations: 0 });
+  if (!box.observer) {
+    box.mutations = 0;
+    box.observer = new MutationObserver(list => { box.mutations += list.length; });
+    box.observer.observe(document, { subtree: true, childList: true, attributes: true, characterData: true });
+  }
+  return { sig, mutations: box.mutations, dialogs: document.querySelectorAll('[role="dialog"],[aria-modal="true"]').length };
 }
-async function signature(tabId) {
-  try { const [{ result }] = await chrome.scripting.executeScript({ target: { tabId }, func: pageSignature }); return typeof result === 'string' ? result : ''; } catch { return ''; }
+async function watched(tabId) {
+  try {
+    const [{ result }] = await chrome.scripting.executeScript({ target: { tabId }, func: pageWatched });
+    return result && typeof result === 'object' ? result : null;
+  } catch { return null; }
 }
+async function signature(tabId) { const state = await watched(tabId); return state ? state.sig : ''; }
+// App pages open menus and dialogs a second or two after the click, and a check made after 1.2 seconds
+// reads that as a dead click. Wait for the page to go quiet instead: quiet plus a change is a finished
+// action, quiet plus no change is a real NO_EFFECT, and a busy page is given the time it needs.
+const SETTLE_MAX = 4000;
 async function settle(tabId, before) {
-  let latest = before;
-  for (let attempt = 0; attempt < 6; attempt++) {
-    await sleep(200);
-    latest = await signature(tabId);
-    if (latest && before && latest !== before) return latest;
+  let latest = before, lastMutations = -1, quiet = 0, changedAt = 0;
+  const deadline = Date.now() + SETTLE_MAX;
+  for (let attempt = 0; attempt < 20 && Date.now() < deadline; attempt++) {
+    await sleep(attempt < 2 ? 120 : 180);
+    const state = await watched(tabId);
+    // The tab was navigating or refused injection: the effect is unknown, not disproved.
+    if (!state) return '';
+    if (state.mutations !== lastMutations) { lastMutations = state.mutations; quiet = 0; } else quiet += 1;
+    latest = state.sig || latest;
+    const changed = !!before && !!state.sig && state.sig !== before;
+    if (changed && !changedAt) changedAt = Date.now();
+    // A live page (ticker, feed, animation) never goes fully quiet: report the change once it has
+    // settled for a moment instead of waiting out the whole window.
+    if (changed && (quiet >= 1 || Date.now() - changedAt > 1200)) return state.sig;
+    if (!changed && quiet >= 2 && attempt >= 2) return state.sig || latest;
   }
   return latest;
 }
@@ -494,7 +539,8 @@ async function clickType(tab, action, width, height) {
       return { typed: 'keys-after-insert', verified: null };
     }
     if (action.submit) { await sleep(150); await pressKey(target, 'Enter'); }
-    return { typed: 'insertText' };
+    // The field reports exactly the text that was sent: proof the step worked, whatever the page hash says.
+    return { typed: 'insertText', typedOk: after.kind === 'editable' ? after.value === action.text : null };
   });
 }
 async function workerBase() {
@@ -655,6 +701,7 @@ async function actOnTab(fresh, action, message) {
     const extra = await clickType(fresh, { ...action, x: point.x, y: point.y }, point.width, point.height);
     let after = await settle(fresh.id, before);
     let verified = extra.verified !== undefined && extra.verified !== null ? extra.verified : (before && after ? before !== after : null);
+    if (extra.typedOk === true) verified = true;
     let fallback = false;
     if (action.type === 'click' && verified === false) {
       fallback = await clickElement(fresh.id, { x: point.x, y: point.y });
