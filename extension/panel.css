@@ -398,6 +398,27 @@ dialog[open] { animation:pop .18s ease both }
 .history-drop { display:grid; place-items:center; width:30px; flex:none; color:var(--faint); border-left:1px solid var(--line); transition:color .12s ease, background .12s ease }
 .history-drop:hover { color:var(--bad); background:var(--surface-3) }
 
+.macro-list { display:flex; flex-direction:column; gap:4px; margin:10px 0; max-height:240px; overflow-y:auto }
+.macro-row { display:flex; align-items:stretch; border:1px solid var(--line); border-radius:9px; overflow:hidden; background:var(--surface-2) }
+.macro-open { display:flex; flex:1; min-width:0; flex-direction:column; align-items:flex-start; gap:2px; text-align:left; padding:8px 10px; color:var(--ink-2) }
+.macro-open:hover { background:var(--surface-3) }
+.macro-open strong { font-size:12px; max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
+.macro-meta { font-size:10.5px; color:var(--faint); font-variant-numeric:tabular-nums }
+.macro-run { display:grid; place-items:center; width:30px; flex:none; color:var(--accent); border-left:1px solid var(--line) }
+.macro-run:hover { background:var(--accent-soft) }
+.macro-drop { display:grid; place-items:center; width:30px; flex:none; color:var(--faint); border-left:1px solid var(--line) }
+.macro-drop:hover { color:var(--bad); background:var(--surface-3) }
+.rec-box { margin-top:8px; padding:10px; border:1px solid var(--accent-line); background:var(--accent-soft); border-radius:var(--radius) }
+.rec-box .overline { margin:0 }
+.rec-steps { display:flex; flex-direction:column; gap:2px; margin-top:8px; max-height:200px; overflow-y:auto }
+.rec-step { display:flex; align-items:center; gap:6px; padding:4px 6px; background:var(--surface); border:1px solid var(--line); border-radius:7px }
+.rec-step span { flex:1; min-width:0; font-size:11.5px; color:var(--ink-2); overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
+.rec-step button { color:var(--faint); flex:none; display:grid; place-items:center; width:18px; height:18px; border-radius:5px }
+.rec-step button:hover { color:var(--bad); background:var(--surface-3) }
+.icon-btn.recording { color:var(--bad) }
+.icon-btn.recording .ph { animation:pulse 1.4s ease-in-out infinite }
+@keyframes pulse { 50% { opacity:.35 } }
+
 .ph { display:block; flex:none }
 .ph path, svg.ph { pointer-events:none }
 @keyframes appear { from { opacity:0; transform:translateY(2px) } to { opacity:1; transform:none } }

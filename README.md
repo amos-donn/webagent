@@ -106,6 +106,16 @@ Chats are capped at twenty and the oldest is dropped only with a visible warning
 
 The **Test connection** button reports three things separately: whether the Worker answers at all, which model will answer, and whether its D1 binding is present. A Worker with a right URL and key but no `DB` binding would otherwise only fail on the first real task, with a 503.
 
+## Macros: record once, replay without the model
+
+The stopwatch button's neighbour in the topbar is the macro recorder (`/record`, `/macros`). Press **Record in this tab**, do the job by hand once, then press **Save macro**. What is recorded is the *meaning* of each action — a click, the final value of each field, a chosen option, Enter, a navigation — not pixels and not keystrokes: typing into one field is one step, and the step list reads like the task (`1. Open example.com`, `2. Type “ada@example.com” into Email`, `3. Click Sign in`). Steps can be dropped while recording, and the name is editable before saving.
+
+Each step stores several ways to find its control — a test id, a role and accessible name, a label, a field name, a stable id, its text, and only then a short CSS path — and replay walks that list in that order. The candidates are counted at record time, so a macro that clicked the second "Save" still clicks the second "Save". That is Selenium IDE's fallback-list idea rather than Chrome's single best selector, and it is the difference between a macro that survives a redesign and one that does not.
+
+Replay does not call Gemini. The panel sends each recorded target through the agent's own action path (`target` instead of `ref` or coordinates), so it gets real CDP input, the purple pointer, the settle window, the effect check and the scripted-click fallback — a macro is the agent's hands with a recorded intention, not a second automation engine. A step waits for its control (up to six seconds) rather than sleeping, and `<select>` is set through `input`/`change` so native dropdowns work without an OS-level menu.
+
+When a step cannot find its target, the macro stops, says which step failed, and puts a repair prompt in the message box — the macro name, the failure and the remaining steps. Send it, and the agent finishes the job from the page it is on. **Passwords and card numbers are never stored**: a credential-looking field (password type, `autocomplete=current-password`/`new-password`/`one-time-code`/`cc-*`, or a name that says so) is recorded as a step with no value, and replay clicks it, pauses, and waits for you to type it. Recording covers the top frame only — a login widget inside a cross-origin iframe is not captured — and stops on `chrome://` pages, the Web Store and the PDF viewer, which Chrome does not allow extensions to script.
+
 ## What a round costs
 
 The hourglass button in the topbar (and `/timings`) opens the speed panel: how long whole tasks take, then what the last 60 rounds actually spent, as medians with a stacked bar and the last rounds listed, exportable as `mezze-timings.json`.

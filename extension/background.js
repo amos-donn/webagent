@@ -517,6 +517,334 @@ async function clickElement(tabId, point) {
     return !!result;
   } catch { return false; }
 }
+/* ---------- macros: recording and locator replay ---------- */
+// A recorded step names its target by meaning — a role and a name, a label, a test id — with the
+// structural CSS path kept as a last resort. Everything below runs inside the page, so each function
+// is self-contained: Chrome serialises it, so it may not reference anything outside its own body.
+const RECORD_KEY = 'macro:rec';
+function locateTarget(target) {
+  if (!Array.isArray(target) || !target.length) return null;
+  const INTERACTIVE = 'a[href],button,input:not([type=hidden]),select,textarea,summary,[role=button],[role=link],[role=tab],[role=checkbox],[role=radio],[role=menuitem],[role=combobox],[role=switch],[contenteditable=""],[contenteditable="true"]';
+  const text = el => (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+  const nameOf = el => {
+    const attr = name => (el.getAttribute ? (el.getAttribute(name) || '') : '');
+    const aria = attr('aria-label').replace(/\s+/g, ' ').trim();
+    if (aria) return aria.slice(0, 120);
+    const by = attr('aria-labelledby');
+    if (by) {
+      const joined = by.split(/\s+/).map(id => document.getElementById(id)).filter(Boolean).map(text).join(' ').trim();
+      if (joined) return joined.slice(0, 120);
+    }
+    const wrap = el.closest ? el.closest('label') : null;
+    if (wrap && text(wrap)) return text(wrap).slice(0, 120);
+    if (el.id) { const label = document.querySelector(`label[for="${CSS.escape(el.id)}"]`); if (label && text(label)) return text(label).slice(0, 120); }
+    const placeholder = attr('placeholder');
+    if (placeholder) return placeholder.slice(0, 120);
+    const own = text(el);
+    if (own) return own.slice(0, 120);
+    return String(attr('name') || attr('title') || '').slice(0, 120);
+  };
+  const roleOf = el => {
+    const explicit = el.getAttribute ? el.getAttribute('role') : '';
+    if (explicit) return explicit.split(/\s+/)[0];
+    const tag = el.tagName;
+    if (tag === 'A') return el.hasAttribute('href') ? 'link' : 'generic';
+    if (tag === 'BUTTON' || tag === 'SUMMARY') return 'button';
+    if (tag === 'SELECT') return 'combobox';
+    if (tag === 'TEXTAREA') return 'textbox';
+    if (tag === 'INPUT') {
+      const type = (el.type || 'text').toLowerCase();
+      if (['submit', 'button', 'reset', 'image'].includes(type)) return 'button';
+      if (type === 'checkbox') return 'checkbox';
+      if (type === 'radio') return 'radio';
+      if (type === 'search') return 'searchbox';
+      return 'textbox';
+    }
+    return el.isContentEditable ? 'textbox' : 'generic';
+  };
+  const visible = el => {
+    if (!el || el.nodeType !== 1 || el.closest?.('[id^="webagent-"]')) return false;
+    const rect = el.getBoundingClientRect();
+    if (rect.width < 1 || rect.height < 1) return false;
+    const style = getComputedStyle(el);
+    return style.visibility !== 'hidden' && style.display !== 'none' && Number(style.opacity || 1) > 0.05;
+  };
+  const matches = candidate => {
+    try {
+      if (candidate.k === 'testid') return [...document.querySelectorAll(`[data-testid="${CSS.escape(candidate.value)}"],[data-test="${CSS.escape(candidate.value)}"],[data-qa="${CSS.escape(candidate.value)}"],[data-cy="${CSS.escape(candidate.value)}"],[data-test-id="${CSS.escape(candidate.value)}"]`)].filter(visible);
+      if (candidate.k === 'id') return [...document.querySelectorAll(`#${CSS.escape(candidate.value)}`)].filter(visible);
+      if (candidate.k === 'name') return [...document.querySelectorAll(`[name="${CSS.escape(candidate.value)}"]`)].filter(visible);
+      if (candidate.k === 'css') return [...document.querySelectorAll(candidate.value)].filter(visible).slice(0, 60);
+      if (candidate.k === 'role') return [...document.querySelectorAll(INTERACTIVE)].filter(el => roleOf(el) === candidate.value && nameOf(el) === candidate.name && visible(el));
+      if (candidate.k === 'label' || candidate.k === 'text') return [...document.querySelectorAll(INTERACTIVE)].filter(el => nameOf(el) === candidate.value && visible(el)).slice(0, 60);
+    } catch { /* a selector the page has since made invalid is skipped, not fatal */ }
+    return [];
+  };
+  for (const candidate of target) {
+    const list = matches(candidate);
+    if (!list.length) continue;
+    const el = list[Math.min(candidate.nth || 0, list.length - 1)];
+    if (!el) continue;
+    el.scrollIntoView({ block: 'center', inline: 'center' });
+    const rect = el.getBoundingClientRect();
+    if (rect.width < 1 || rect.height < 1) continue;
+    return { x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2), via: candidate.k, count: list.length };
+  }
+  return null;
+}
+// A step is a condition, not a sleep: wait for the target to exist, up to a budget, so a menu that
+// paints 800 ms late still plays back.
+async function targetBox(tabId, target, waitMs = 6000) {
+  const deadline = Date.now() + Math.min(Math.max(Number(waitMs) || 6000, 500), 15000);
+  for (;;) {
+    const frames = await chrome.scripting.executeScript({ target: { tabId }, func: locateTarget, args: [target] }).catch(() => []);
+    const result = frames?.[0]?.result;
+    if (result && Number.isFinite(result.x) && Number.isFinite(result.y)) {
+      const live = (await liveViewportSafe(tabId)) || { width: 1280, height: 800 };
+      return { x: result.x, y: result.y, width: live.width, height: live.height, via: result.via, count: result.count };
+    }
+    if (Date.now() >= deadline) return null;
+    await sleep(220);
+  }
+}
+// A native select opens an OS-level menu that synthetic input cannot walk, so the value is set the
+// way the page's own framework expects: assign, then fire input and change.
+function selectOption(x, y, value) {
+  const hit = document.elementFromPoint(x, y);
+  const select = hit?.closest?.('select') || (hit?.tagName === 'SELECT' ? hit : null);
+  if (!select) return { ok: false };
+  const wanted = String(value ?? '');
+  const option = [...select.options].find(item => item.value === wanted) || [...select.options].find(item => (item.text || '').replace(/\s+/g, ' ').trim() === wanted);
+  if (!option) return { ok: false, value: select.value };
+  select.value = option.value;
+  select.dispatchEvent(new Event('input', { bubbles: true }));
+  select.dispatchEvent(new Event('change', { bubbles: true }));
+  return { ok: true, value: select.value };
+}
+// What the person actually did. Capture-phase listeners on window, in the isolated world, so a page
+// that patches addEventListener cannot blind it. The step is a meaning, and a field that looks like a
+// credential is recorded as a placeholder — its value is never sent, never stored.
+function installRecorder(session) {
+  const KEY = '__mezzeRecorder';
+  const previous = window[KEY];
+  if (previous?.session === session) return true;
+  try { previous?.stop?.(); } catch { /* an old recorder whose page is already gone */ }
+
+  const send = event => { try { chrome.runtime.sendMessage({ type: 'macro-event', session, event }); } catch { /* extension reloaded */ } };
+  const text = el => (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+  const INTERACTIVE = 'a[href],button,input:not([type=hidden]),select,textarea,summary,[role=button],[role=link],[role=tab],[role=checkbox],[role=radio],[role=menuitem],[role=combobox],[role=switch],[contenteditable=""],[contenteditable="true"]';
+  const SECRET = /(pass(word|code)?|passwd|otp|one[-_ ]?time|security[-_ ]?code|cvv|cvc|cc[-_ ]?(num|number|exp|csc|name)|card[-_ ]?number|ssn|social[-_ ]?security|iban|routing|\bpin\b)/i;
+  const harmless = el => !el || !el.closest?.('[id^="webagent-"]');
+  const nameOf = el => {
+    const attr = name => (el.getAttribute ? (el.getAttribute(name) || '') : '');
+    const aria = attr('aria-label').replace(/\s+/g, ' ').trim();
+    if (aria) return aria.slice(0, 120);
+    const by = attr('aria-labelledby');
+    if (by) {
+      const joined = by.split(/\s+/).map(id => document.getElementById(id)).filter(Boolean).map(text).join(' ').trim();
+      if (joined) return joined.slice(0, 120);
+    }
+    const wrap = el.closest ? el.closest('label') : null;
+    if (wrap && text(wrap)) return text(wrap).slice(0, 120);
+    if (el.id) { const label = document.querySelector(`label[for="${CSS.escape(el.id)}"]`); if (label && text(label)) return text(label).slice(0, 120); }
+    const placeholder = attr('placeholder');
+    if (placeholder) return placeholder.slice(0, 120);
+    const own = text(el);
+    if (own) return own.slice(0, 120);
+    return String(attr('name') || attr('title') || '').slice(0, 120);
+  };
+  const roleOf = el => {
+    const explicit = el.getAttribute ? el.getAttribute('role') : '';
+    if (explicit) return explicit.split(/\s+/)[0];
+    const tag = el.tagName;
+    if (tag === 'A') return el.hasAttribute('href') ? 'link' : 'generic';
+    if (tag === 'BUTTON' || tag === 'SUMMARY') return 'button';
+    if (tag === 'SELECT') return 'combobox';
+    if (tag === 'TEXTAREA') return 'textbox';
+    if (tag === 'INPUT') {
+      const type = (el.type || 'text').toLowerCase();
+      if (['submit', 'button', 'reset', 'image'].includes(type)) return 'button';
+      if (type === 'checkbox') return 'checkbox';
+      if (type === 'radio') return 'radio';
+      if (type === 'search') return 'searchbox';
+      return 'textbox';
+    }
+    return el.isContentEditable ? 'textbox' : 'generic';
+  };
+  const visible = el => {
+    if (!el || el.nodeType !== 1 || !harmless(el)) return false;
+    const rect = el.getBoundingClientRect();
+    if (rect.width < 1 || rect.height < 1) return false;
+    const style = getComputedStyle(el);
+    return style.visibility !== 'hidden' && style.display !== 'none' && Number(style.opacity || 1) > 0.05;
+  };
+  const matches = candidate => {
+    try {
+      if (candidate.k === 'testid') return [...document.querySelectorAll(`[data-testid="${CSS.escape(candidate.value)}"],[data-test="${CSS.escape(candidate.value)}"],[data-qa="${CSS.escape(candidate.value)}"],[data-cy="${CSS.escape(candidate.value)}"],[data-test-id="${CSS.escape(candidate.value)}"]`)].filter(visible);
+      if (candidate.k === 'id') return [...document.querySelectorAll(`#${CSS.escape(candidate.value)}`)].filter(visible);
+      if (candidate.k === 'name') return [...document.querySelectorAll(`[name="${CSS.escape(candidate.value)}"]`)].filter(visible);
+      if (candidate.k === 'css') return [...document.querySelectorAll(candidate.value)].filter(visible).slice(0, 60);
+      if (candidate.k === 'role') return [...document.querySelectorAll(INTERACTIVE)].filter(el => roleOf(el) === candidate.value && nameOf(el) === candidate.name && visible(el));
+      if (candidate.k === 'label' || candidate.k === 'text') return [...document.querySelectorAll(INTERACTIVE)].filter(el => nameOf(el) === candidate.value && visible(el)).slice(0, 60);
+    } catch { /* skip a strategy the page broke */ }
+    return [];
+  };
+  const cssPath = el => {
+    const parts = [];
+    for (let node = el; node && node.nodeType === 1 && parts.length < 6; node = node.parentElement) {
+      if (node.id && node.id.length < 50 && !/[0-9a-f]{8}|[0-9]{4,}/i.test(node.id)) { parts.unshift(`#${CSS.escape(node.id)}`); break; }
+      let part = node.tagName.toLowerCase();
+      const stable = [...(node.classList || [])].filter(name => name.length < 30 && !/\d{3,}|^(_|css-|sc-|jsx-|ng-)/.test(name)).slice(0, 2);
+      if (stable.length) part += `.${stable.map(name => CSS.escape(name)).join('.')}`;
+      const siblings = node.parentElement ? [...node.parentElement.children].filter(sibling => sibling.tagName === node.tagName) : [];
+      if (siblings.length > 1) part += `:nth-of-type(${siblings.indexOf(node) + 1})`;
+      parts.unshift(part);
+    }
+    return parts.join(' > ');
+  };
+  const candidatesFor = el => {
+    const out = [];
+    const add = (k, value, extra = {}) => {
+      const clean = String(value ?? '').replace(/\s+/g, ' ').trim();
+      if (!clean || clean.length > 200) return;
+      out.push({ k, value: clean, ...extra });
+    };
+    for (const attr of ['data-testid', 'data-test', 'data-qa', 'data-cy', 'data-test-id']) {
+      const value = el.getAttribute?.(attr);
+      if (value) { add('testid', value); break; }
+    }
+    const role = roleOf(el), name = nameOf(el);
+    if (role && role !== 'generic' && name) add('role', role, { name });
+    if (name) add('label', name);
+    const fieldName = el.getAttribute?.('name');
+    if (fieldName) add('name', fieldName);
+    const id = el.id;
+    if (id && id.length < 60 && !/[0-9a-f]{8}-|[0-9]{4,}/i.test(id) && document.querySelectorAll(`#${CSS.escape(id)}`).length === 1) add('id', id);
+    const own = text(el);
+    if (own && own.length <= 80) add('text', own);
+    add('css', cssPath(el));
+    // Count the matches now, so replay can tell "the only Save button" from "the third one".
+    return out.map(candidate => {
+      const list = matches(candidate);
+      return { ...candidate, count: list.length, nth: Math.max(0, list.indexOf(el)) };
+    });
+  };
+  const isEditable = el => {
+    if (!el || el.nodeType !== 1) return false;
+    if (el.isContentEditable) return true;
+    if (el.tagName === 'TEXTAREA') return true;
+    if (el.tagName !== 'INPUT') return false;
+    return !['checkbox', 'radio', 'submit', 'button', 'reset', 'file', 'image', 'range', 'color'].includes((el.type || 'text').toLowerCase());
+  };
+  // Reveal-password toggles rewrite type=password to text, so the field is judged once, when it is
+  // focused, and the verdict is remembered for that element rather than re-read at every keystroke.
+  const secrets = new WeakMap();
+  const secretOf = el => {
+    if (!el) return false;
+    if (secrets.has(el)) return secrets.get(el);
+    let verdict = false;
+    if (el.type === 'password') verdict = true;
+    else {
+      const auto = el.getAttribute?.('autocomplete') || '';
+      if (/(current|new)-password|one-time-code|^cc-/i.test(auto)) verdict = true;
+      else verdict = SECRET.test(`${el.getAttribute?.('name') || ''} ${el.id || ''} ${el.getAttribute?.('aria-label') || ''} ${el.getAttribute?.('placeholder') || ''}`);
+    }
+    secrets.set(el, verdict);
+    return verdict;
+  };
+
+  const state = { field: null, timer: 0, last: null };
+  const flush = () => {
+    if (state.timer) { clearTimeout(state.timer); state.timer = 0; }
+    const el = state.field;
+    state.field = null;
+    if (!el || !el.isConnected) return;
+    const value = typeof el.value === 'string' ? el.value : text(el);
+    if (state.last && state.last.el === el && state.last.value === value) return;
+    state.last = { el, value };
+    const secret = secretOf(el);
+    send({ type: secret ? 'secret' : 'fill', target: candidatesFor(el), label: nameOf(el), text: secret ? undefined : String(value).slice(0, 2000) });
+  };
+  const expire = () => { if (state.timer) { clearTimeout(state.timer); state.timer = 0; } };
+
+  const onClick = event => {
+    if (!event.isTrusted) return;
+    const path = typeof event.composedPath === 'function' ? event.composedPath() : [];
+    const el = path.find(node => node && node.nodeType === 1 && harmless(node)) || event.target;
+    if (!el || el.nodeType !== 1 || el === document.body || el === document.documentElement) return;
+    // A click that only focuses a field is not a step: the fill that follows says what happened.
+    if (isEditable(el) || el.tagName === 'SELECT' || el.tagName === 'OPTION') { state.field = isEditable(el) ? el : null; return; }
+    // Someone who types and immediately clicks Save is inside the debounce window: the pending text
+    // is a step too, and dropping it here would lose what they wrote.
+    flush();
+    send({ type: 'click', target: candidatesFor(el), label: nameOf(el) });
+  };
+  const onInput = event => {
+    if (!event.isTrusted) return;
+    const el = event.target;
+    if (!isEditable(el)) return;
+    state.field = el;
+    if (state.timer) clearTimeout(state.timer);
+    state.timer = setTimeout(flush, 500);
+  };
+  const onChange = event => {
+    if (!event.isTrusted) return;
+    const el = event.target;
+    if (el?.tagName === 'SELECT') { flush(); send({ type: 'select', target: candidatesFor(el), label: nameOf(el), value: String(el.value ?? '') }); return; }
+    if (isEditable(el)) flush();
+  };
+  const onFocus = event => { const el = event.target; if (isEditable(el)) state.field = el; };
+  const onKey = event => {
+    if (!event.isTrusted || event.key !== 'Enter') return;
+    const el = event.target;
+    if (!isEditable(el) && el?.tagName !== 'SELECT') return;
+    // Enter in a field submits its form; recording the key keeps that behaviour instead of guessing.
+    flush();
+    send({ type: 'key', key: 'Enter' });
+  };
+  const onHide = () => { if (document.hidden) flush(); };
+  const onPageHide = () => flush();
+
+  const listeners = [['click', onClick, true], ['input', onInput, true], ['change', onChange, true], ['focusin', onFocus, true], ['keydown', onKey, true], ['pagehide', onPageHide, true]];
+  for (const [type, fn, capture] of listeners) window.addEventListener(type, fn, capture);
+  document.addEventListener('visibilitychange', onHide, true);
+
+  // Client-side routing creates no new document, so a route change has to be noticed here; that is
+  // what tells the panel a step navigated, or that the user went somewhere by hand.
+  let href = location.href;
+  const poll = setInterval(() => {
+    if (location.href === href) return;
+    href = location.href;
+    send({ type: 'page', href, title: document.title });
+  }, 500);
+
+  window[KEY] = {
+    session,
+    stop() {
+      clearInterval(poll);
+      expire();
+      for (const [type, fn, capture] of listeners) window.removeEventListener(type, fn, capture);
+      document.removeEventListener('visibilitychange', onHide, true);
+      if (window[KEY]?.session === session) delete window[KEY];
+    }
+  };
+  send({ type: 'page', href: location.href, title: document.title });
+  return true;
+}
+function uninstallRecorder(session) {
+  const recorder = window.__mezzeRecorder;
+  if (recorder && (!session || recorder.session === session)) recorder.stop();
+  return true;
+}
+// The session lives in session storage rather than a global, so it survives a service worker restart
+// and every navigation re-arms the recorder on the new document.
+async function armRecorder(tabId) {
+  const saved = (await chrome.storage.session.get(RECORD_KEY).catch(() => ({})))[RECORD_KEY];
+  if (!saved || saved.tabId !== tabId) return false;
+  await chrome.scripting.executeScript({ target: { tabId }, func: installRecorder, args: [saved.session] }).catch(() => {});
+  return true;
+}
+
 async function clickType(tab, action, width, height) {
   return debug(tab.id, async target => {
     const live = await liveViewport(target);
@@ -640,6 +968,7 @@ async function guardAction(tabId, action, message) {
   if (!['click', 'type', 'write', 'fill'].includes(action.type)) return;
   const labels = [];
   if (action.ref) labels.push(await refLabel(tabId, action.ref));
+  else if (action.label) labels.push(String(action.label));
   if (action.type === 'fill' && Array.isArray(action.fields)) for (const field of action.fields) if (field.ref) labels.push(await refLabel(tabId, field.ref));
   const text = `${labels.join(' ')} ${action.description || ''} ${action.text || ''} ${action.brief || ''} ${action.submit ? 'submit' : ''}`;
   // Match the goal, the plan titles and the chat so far, by meaning rather than by exact wording.
@@ -681,6 +1010,15 @@ async function actOnTab(fresh, action, message) {
     return { ...outcome, notice: gate?.notice };
   }
   const before = await signature(fresh.id);
+  if (action.type === 'select') {
+    const point = action.target ? await targetBox(fresh.id, action.target, message.waitMs) : null;
+    if (!point) fail('STALE_REF', 'That list is no longer on the page, so the recorded option could not be chosen.');
+    const frames = await chrome.scripting.executeScript({ target: { tabId: fresh.id }, func: selectOption, args: [point.x, point.y, String(action.value ?? '')] });
+    const chosen = frames?.[0]?.result;
+    if (!chosen?.ok) fail('NO_EFFECT', `That list no longer offers “${clip(action.value, 40)}”.`);
+    const after = await settle(fresh.id, before);
+    return { selected: chosen.value, effect: { verified: before && after ? before !== after : true }, notice: gate?.notice };
+  }
   if (action.type === 'scroll') {
     if (!['up', 'down'].includes(action.direction)) throw new Error('Invalid scroll direction.');
     await chrome.scripting.executeScript({ target: { tabId: fresh.id }, func: direction => window.scrollBy({ top: direction === 'up' ? -Math.round(innerHeight * .75) : Math.round(innerHeight * .75), behavior: 'instant' }), args: [action.direction] });
@@ -697,7 +1035,11 @@ async function actOnTab(fresh, action, message) {
   if (action.type === 'key') await debug(fresh.id, target => pressKey(target, action.key));
   else if (['click', 'type'].includes(action.type)) {
     let point;
-    if (action.ref) point = await refBox(fresh.id, action.ref, message.url);
+    if (action.target) {
+      // A recorded step waits for its target instead of failing on the first look.
+      point = await targetBox(fresh.id, action.target, message.waitMs);
+      if (!point) fail('STALE_REF', 'That element is not on the page any more, so the recorded step could not find it.');
+    } else if (action.ref) point = await refBox(fresh.id, action.ref, message.url);
     else {
       if (![action.x, action.y, message.width, message.height].every(Number.isFinite)) fail('INVALID_COORDINATES', 'The coordinates for that action are missing.');
       point = { x: action.x, y: action.y, width: message.width, height: message.height };
@@ -745,6 +1087,25 @@ async function handle(message) {
     else { bridgeSocket?.close(); bridgeSocket = null; }
     return { on: message.on === true, connected: !!bridgeSocket };
   }
+  if (message.type === 'record-start') {
+    const tab = await getTab(message.tabId);
+    if (!permitted(tab.url)) throw new Error('Recording needs an HTTPS page (or a local development page). Chrome internal pages are blocked.');
+    const session = String(message.session || '');
+    if (!session) throw new Error('Missing recording session.');
+    await chrome.storage.session.set({ [RECORD_KEY]: { session, tabId: tab.id, startUrl: tab.url, at: Date.now() } });
+    await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: installRecorder, args: [session] });
+    return { session, tabId: tab.id, url: tab.url };
+  }
+  if (message.type === 'record-stop') {
+    const saved = (await chrome.storage.session.get(RECORD_KEY).catch(() => ({})))[RECORD_KEY];
+    const tabId = message.tabId || saved?.tabId;
+    if (tabId) await chrome.scripting.executeScript({ target: { tabId }, func: uninstallRecorder, args: [message.session || saved?.session || ''] }).catch(() => {});
+    await chrome.storage.session.remove(RECORD_KEY).catch(() => {});
+    return { stopped: true };
+  }
+  // The panel receives these directly from the page; answering here only stops the content script
+  // from seeing "Unknown action" as a rejection.
+  if (message.type === 'macro-event') return { ok: true };
   if (message.type === 'tabs') {
     // Every window, not just this one: the page you reference with @ is often in another window.
     const tabs = await chrome.tabs.query({});
@@ -788,7 +1149,7 @@ async function handle(message) {
     if (!samePage(tab.url, message.url)) fail('PAGE_CHANGED', 'That page changed. Observe it again.');
     const action = message.action;
     if (action?.type === 'think') return {};
-    if (!action || !['click', 'type', 'write', 'read', 'scroll', 'wait', 'navigate', 'key', 'fill'].includes(action.type)) throw new Error('Unknown action.');
+    if (!action || !['click', 'type', 'write', 'read', 'scroll', 'wait', 'navigate', 'key', 'fill', 'select'].includes(action.type)) throw new Error('Unknown action.');
     // Do not steal focus. Once the debugger is attached Chrome delivers input events and
     // screenshots to a tab nobody is looking at, so the run can continue while you work elsewhere.
     // A discarded tab has to be loaded before it can be driven, and that needs the tab shown.
@@ -804,4 +1165,11 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
   ensureBridge();
   handle(message).then(data => respond({ data }), e => respond({ error: e.message, code: e.code || 'ERROR' }));
   return true;
+});
+// A recording spans documents: the page is replaced on every navigation, so the recorder has to be
+// re-armed on the new one. The session itself lives in session storage, so this survives the service
+// worker being shut down between two clicks.
+chrome.tabs.onUpdated.addListener((tabId, info) => {
+  if (!info.url && !['loading', 'complete'].includes(info.status)) return;
+  armRecorder(tabId).catch(() => {});
 });

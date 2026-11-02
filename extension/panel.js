@@ -1,5 +1,5 @@
 const $ = id => document.getElementById(id);
-const ICONS = { think:'sparkle', click:'cursor-click', type:'keyboard', write:'sparkle', read:'book-open-text', scroll:'arrows-down-up', wait:'hourglass', navigate:'arrow-right', key:'key-return', switch:'arrow-right', open:'plus', gather:'book-open-text', close:'x' };
+const ICONS = { think:'sparkle', click:'cursor-click', type:'keyboard', write:'sparkle', read:'book-open-text', scroll:'arrows-down-up', wait:'hourglass', navigate:'arrow-right', key:'key-return', switch:'arrow-right', open:'plus', gather:'book-open-text', close:'x', select:'arrows-down-up', secret:'keyboard' };
 // Two names per step: what it is doing while it runs, and what it did once it finished. The
 // timeline keeps the past tense because it is a record of work, not a spinner that vanished.
 const VERBS = {
@@ -9,7 +9,7 @@ const VERBS = {
   navigate: ['Opening the page', 'Opened the page'], key: ['Pressing a key', 'Pressed a key'],
   switch: ['Switching tabs', 'Switched tabs'], open: ['Opening a new page', 'Opened a new page'],
   gather: ['Reading tabs', 'Read the tabs'], close: ['Closing the tab', 'Closed the tab'],
-  inspect: ['Looking at the page', 'Looked at the page']
+  select: ['Choosing an option', 'Chose an option'], inspect: ['Looking at the page', 'Looked at the page']
 };
 const verb = (type, tense = 0) => (VERBS[type] || ['Working', 'Worked'])[tense];
 const LABELS = Object.fromEntries(Object.entries(VERBS).map(([type, names]) => [type, names[0]]));
@@ -36,6 +36,9 @@ let tabCache = [], actingTabId = null, contextIds = [];
 // There is no mode picker any more: every round runs on its own, and a risky-looking step is still
 // matched against the goal and announced in the timeline.
 let mode = 'autopilot', planMode = 'auto', lastShot = '', skills = [];
+// Recording state, saved macros, and the replay in flight. A replay is not a workflow: it has no
+// model, no plan and no retries — it either finds the control the recording named or it stops.
+let rec = null, macros = [], macroRun = null;
 // Speed moves the model and the pauses together: a light model answers in about a second, so a
 // 600 ms pause between actions is most of the wait. Careful is the old behaviour.
 let speed = 'fast', slowPages = false, stayPut = true;
@@ -1082,6 +1085,7 @@ async function executeOne(run, current) {
   return 'ok';
 }
 async function startWorkflow(goal, skill) {
+  if (rec) throw new Error('Save or cancel the recording first — a run and a recording cannot share the tab.');
   await listTabs().catch(() => {});
   const acting = tabCache.find(t => t.id === actingTabId) || tabCache.find(t => t.active) || tabCache[0];
   if (!acting) throw new Error('Open a webpage first.');
@@ -1138,6 +1142,8 @@ const COMMANDS = [
   { cmd: '/noplan', hint: 'Skip the checklist', run: () => setPlanMode('never') },
   { cmd: '/auto-plan', hint: "Let the agent decide about a checklist", run: () => setPlanMode('auto') },
   { cmd: '/skill', hint: 'Save this run as a reusable skill', run: () => saveSkill().catch(e => notify(e.message || 'Could not save the skill.', true)) },
+  { cmd: '/record', hint: 'Record a macro in this tab', run: () => { openMacros(); startRecording().catch(e => notify(e.message || 'Could not start recording.', true)); } },
+  { cmd: '/macros', hint: 'Open recorded macros', run: () => openMacros() },
   { cmd: '/saw', hint: 'Show the screenshot behind the last step', run: () => openSaw() },
   { cmd: '/timings', hint: 'Open the speed panel', run: () => openTimings() },
   { cmd: '/stop', hint: 'Stop the running workflow', run: () => { stop(); notify('Workflow stopped.'); } }
@@ -1231,6 +1237,230 @@ function renderSkills() {
     row.append(name, drop); list.append(row);
   }
 }
+/* ---------- macros ---------- */
+// A macro is a recorded sequence of ordinary actions, replayed without a model call. The rules about
+// what a step means live here; the capture itself runs in the page (installRecorder in
+// background.js), and the locator resolution runs there too, so replay uses trusted CDP input.
+const MACROS_KEY = 'macros';
+const REC_KEY = 'macro:rec';
+const REC_STEPS_KEY = 'macro:steps';
+
+async function saveRec() {
+  if (!rec) return;
+  await chrome.storage.session.set({
+    [REC_STEPS_KEY]: { session: rec.session, name: rec.name, startUrl: rec.startUrl, href: rec.href, steps: rec.steps, lastAt: rec.lastAt }
+  }).catch(() => {});
+}
+
+function renderMacros() {
+  const list = $('macro-list');
+  if (!list) return;
+  $('macros-btn').classList.toggle('recording', !!rec);
+  $('macro-record').hidden = !!rec;
+  $('rec-box').hidden = !rec;
+  if (rec) {
+    if ($('rec-name').value !== rec.name) $('rec-name').value = rec.name;
+    const box = $('rec-steps'); box.textContent = '';
+    if (!rec.steps.length) { const empty = document.createElement('p'); empty.className = 'hint'; empty.textContent = 'Nothing yet — click and type in the page.'; box.append(empty); }
+    rec.steps.forEach((step, index) => {
+      const row = document.createElement('div'); row.className = 'rec-step';
+      const text = document.createElement('span'); text.textContent = `${index + 1}. ${Macros.label(step)}`; text.title = Macros.label(step);
+      const drop = document.createElement('button'); drop.type = 'button'; drop.title = 'Drop this step'; drop.setAttribute('aria-label', `Drop step ${index + 1}`); setIcon(drop, 'x', 10);
+      drop.addEventListener('click', () => { rec.steps = rec.steps.filter((_, at) => at !== index); saveRec(); renderMacros(); });
+      row.append(text, drop); box.append(row);
+    });
+  }
+  list.textContent = '';
+  if (!macros.length) { const empty = document.createElement('p'); empty.className = 'hint'; empty.textContent = 'No macros yet. Record one, then replay it in one click — no model call, no quota.'; list.append(empty); return; }
+  for (const macro of macros) {
+    const row = document.createElement('div'); row.className = 'macro-row';
+    const open = document.createElement('button'); open.type = 'button'; open.className = 'macro-open'; open.title = `Run “${macro.name}” on ${Macros.host(macro.startUrl) || 'this tab'}`;
+    const name = document.createElement('strong'); name.textContent = macro.name || 'Macro';
+    const meta = document.createElement('span'); meta.className = 'macro-meta';
+    meta.textContent = `${Macros.summary(macro)}${macro.lastRun ? ` · last ran ${new Date(macro.lastRun).toLocaleDateString()}` : ''}`;
+    open.append(name, meta);
+    open.addEventListener('click', () => { $('macros-dialog').close(); runMacro(macro).catch(e => notify(e.message || 'Could not run that macro.', true)); });
+    const start = document.createElement('button'); start.type = 'button'; start.className = 'macro-run'; start.title = 'Run without the agent'; start.setAttribute('aria-label', `Run ${macro.name}`); setIcon(start, 'arrow-right', 12);
+    start.addEventListener('click', () => { $('macros-dialog').close(); runMacro(macro).catch(e => notify(e.message || 'Could not run that macro.', true)); });
+    const drop = document.createElement('button'); drop.type = 'button'; drop.className = 'macro-drop'; drop.title = 'Delete this macro'; drop.setAttribute('aria-label', `Delete ${macro.name}`); setIcon(drop, 'x', 11);
+    drop.addEventListener('click', async () => {
+      if (macroRun && macroRun.macro.id === macro.id) { notify('Stop the replay before deleting this macro.', true); return; }
+      macros = macros.filter(item => item.id !== macro.id);
+      await chrome.storage.local.set({ [MACROS_KEY]: macros });
+      renderMacros(); notify(`Deleted “${macro.name}”.`);
+    });
+    row.append(open, start, drop); list.append(row);
+  }
+}
+
+function onMacroEvent(event) {
+  if (!rec || !event?.type) return;
+  const now = Date.now();
+  if (event.type === 'page') {
+    if (!event.href || event.href === rec.href) return;
+    // A click that navigated already said what happened; a typed address, a back button or a link
+    // opened by the page itself did not, so those become a navigation step of their own.
+    if (!rec.lastAt || now - rec.lastAt > 4000) rec.steps = Macros.append(rec.steps, { type: 'navigate', url: event.href, at: now });
+    rec.href = event.href;
+    rec.lastAt = now;
+    saveRec(); renderMacros();
+    return;
+  }
+  const step = Macros.prune([{ ...event, at: now }])[0];
+  if (!step) return;
+  rec.steps = Macros.append(rec.steps, step);
+  rec.lastAt = now;
+  saveRec(); renderMacros();
+}
+
+async function startRecording() {
+  if (rec) return;
+  if (workflow || macroRun) throw new Error('Stop the run in progress before recording.');
+  await listTabs().catch(() => {});
+  const tab = tabCache.find(t => t.id === actingTabId) || tabCache.find(t => t.active) || tabCache[0];
+  if (!tab?.id) throw new Error('Open a webpage first.');
+  if (!tab.supported) throw new Error('This page cannot be recorded. Chrome internal pages are blocked.');
+  await permission(tab.url);
+  const session = crypto.randomUUID();
+  const out = await send('record-start', { tabId: tab.id, session });
+  rec = { session, tabId: out.tabId, startUrl: out.url, href: out.url, steps: [], name: Macros.nameFor(tab.title, out.url), lastAt: 0 };
+  await saveRec();
+  renderMacros();
+  notify('Recording. Do the task in the page; press Save when you are done.');
+}
+
+async function stopRecording() {
+  const current = rec;
+  rec = null;
+  await chrome.storage.session.remove(REC_STEPS_KEY).catch(() => {});
+  if (current) await send('record-stop', { tabId: current.tabId, session: current.session }).catch(() => {});
+  renderMacros();
+}
+
+async function saveRecording() {
+  if (!rec) return;
+  const steps = Macros.prune(rec.steps);
+  if (!steps.length) throw new Error('Nothing recorded yet — click or type in the page, then save.');
+  const name = ($('rec-name').value || '').trim() || rec.name;
+  const macro = { id: crypto.randomUUID(), name: name.slice(0, 60), startUrl: rec.startUrl, host: Macros.host(rec.startUrl), steps, at: Date.now(), runs: 0, lastRun: 0 };
+  macros = [macro, ...macros].slice(0, 30);
+  await chrome.storage.local.set({ [MACROS_KEY]: macros });
+  await stopRecording();
+  notify(`Saved “${macro.name}” — ${steps.length} step${steps.length === 1 ? '' : 's'}.`);
+}
+
+async function resumeRecording() {
+  const saved = await chrome.storage.session.get([REC_KEY, REC_STEPS_KEY]).catch(() => ({}));
+  const live = saved[REC_KEY], steps = saved[REC_STEPS_KEY];
+  if (!live || !steps || live.session !== steps.session) return;
+  const tab = await chrome.tabs.get(live.tabId).catch(() => null);
+  if (!tab?.id) { await chrome.storage.session.remove([REC_KEY, REC_STEPS_KEY]).catch(() => {}); return; }
+  rec = { session: live.session, tabId: live.tabId, startUrl: steps.startUrl || live.startUrl, href: steps.href || live.startUrl, steps: steps.steps || [], name: steps.name || Macros.nameFor(tab.title, tab.url), lastAt: steps.lastAt || 0 };
+  notify('Still recording this tab — open Macros and press Save when you are done.');
+}
+
+// One step of a replay. A step waits for its control instead of sleeping, so a slow page is slower,
+// not broken; a step that never finds it stops the macro and hands the rest to the agent.
+async function playStep(step, index, macro) {
+  const tabId = macroRun.tabId;
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  if (!tab?.url) throw new Error('The tab this macro runs in was closed.');
+  loading(`Replaying ${index + 1}/${macro.steps.length}`, ICONS[step.type] || 'arrow-right');
+  currentAction(Macros.label(step));
+  const started = performance.now();
+  const base = { tabId, url: tab.url, stayPut, settleMs: settleFor() };
+  let result = {};
+  if (step.type === 'navigate') {
+    await permission(step.url).catch(() => {});
+    result = await send('act', { ...base, action: { type: 'navigate', url: step.url, description: Macros.label(step) } });
+    await waitForTab(tabId, 12000);
+  } else if (step.type === 'key') {
+    result = await send('act', { ...base, action: { type: 'key', key: step.key, description: Macros.label(step) } });
+  } else {
+    const action = { description: Macros.label(step), target: step.target, label: step.label || Macros.label(step) };
+    if (step.type === 'fill') { action.type = 'type'; action.text = step.text; }
+    else if (step.type === 'select') { action.type = 'select'; action.value = step.value; }
+    else action.type = 'click';
+    result = await send('act', { ...base, action });
+    // The value was never recorded, so the replay stops here and waits for the person to type it.
+    if (step.type === 'secret') await macroHold(`Type your own value into “${step.label || 'that field'}” in the page, then press Continue.`);
+  }
+  const shown = step.type === 'fill' ? 'type' : step.type === 'secret' ? 'wait' : step.type;
+  recordActivity({ type: shown, description: Macros.label(step) }, result?.url || tab.url, result, Math.round(performance.now() - started), null, { changed: result?.effect?.verified !== false });
+  currentAction(null);
+}
+
+function macroHold(message) {
+  const run = macroRun;
+  if (!run) return Promise.resolve();
+  $('loading').hidden = true;
+  currentAction(null);
+  notify(message);
+  $('pause').hidden = false;
+  setIcon($('pause'), 'arrow-right', 16);
+  $('pause').title = 'Continue the macro';
+  $('pause').setAttribute('aria-label', 'Continue the macro');
+  $('pause').classList.add('held');
+  return new Promise(resolve => { run.awaiting = resolve; });
+}
+
+function cancelMacro() {
+  if (!macroRun) return false;
+  macroRun.cancelled = true;
+  macroRun.awaiting?.();
+  macroRun.awaiting = null;
+  return true;
+}
+
+async function runMacro(macro) {
+  if (workflow || macroRun) throw new Error('Stop what is running first.');
+  if (!macro?.steps?.length) throw new Error('That macro has no steps.');
+  await listTabs().catch(() => {});
+  let tab = tabCache.find(t => t.id === actingTabId) || tabCache.find(t => t.active) || tabCache[0];
+  if (!tab?.id) throw new Error('Open a webpage first.');
+  if (Macros.host(tab.url) !== macro.host) {
+    // A macro starts where it was recorded, not wherever the panel happened to be.
+    await permission(macro.startUrl);
+    await chrome.tabs.update(tab.id, { url: macro.startUrl, active: !stayPut });
+    tab = await waitForTab(tab.id, 15000);
+    if (!tab?.id) throw new Error('Could not open the page that macro starts on.');
+    actingTabId = tab.id;
+    renderTabs();
+  }
+  macroRun = { macro, tabId: tab.id, index: 0, cancelled: false, awaiting: null };
+  $('stop').hidden = false; $('start').hidden = true; $('goal').disabled = true; $('run-dot').hidden = false;
+  renderMacros();
+  pushMessage('note', `Replaying “${macro.name}” — ${macro.steps.length} steps, no model call.`);
+  try {
+    for (const [index, step] of macro.steps.entries()) {
+      if (!macroRun || macroRun.cancelled) break;
+      macroRun.index = index;
+      await playStep(step, index, macro);
+    }
+    if (macroRun && !macroRun.cancelled) {
+      macro.runs = (macro.runs || 0) + 1;
+      macro.lastRun = Date.now();
+      await chrome.storage.local.set({ [MACROS_KEY]: macros });
+      pushMessage('note', `Macro “${macro.name}” finished — ${macro.steps.length} steps.`);
+      notify(`“${macro.name}” finished.`);
+    }
+  } catch (e) {
+    const failed = macroRun?.index || 0;
+    notify(`Macro stopped at step ${failed + 1}: ${e.message}`, true);
+    pushMessage('note', `Macro stopped at step ${failed + 1} (${Macros.label(macro.steps[failed])}): ${e.message} The rest is in the message box if you want the agent to finish it.`);
+    $('goal').value = Macros.recovery(macro, failed, e.message);
+    grow();
+  } finally {
+    macroRun = null;
+    $('stop').hidden = true; $('start').hidden = false; $('goal').disabled = false; $('run-dot').hidden = true; $('pause').hidden = true; $('pause').classList.remove('held');
+    $('loading').hidden = true;
+    currentAction(null);
+    renderMacros();
+  }
+}
+
+function openMacros() { renderMacros(); if (!$('macros-dialog').open) $('macros-dialog').showModal(); }
+
 // The panel never asked the Worker anything but a full run, so a typo in the URL or a missing key only
 // showed up as a failed task. /health answers in one request and names the model in use.
 async function testConnection() {
@@ -1280,7 +1510,8 @@ function renderSuggest() {
 }
 $('composer').addEventListener('submit', async event => {
   event.preventDefault();
-  if (workflow) return;
+  if (workflow || macroRun) return;
+  if (rec) { notify('Save or cancel the recording first.', true); return; }
   const goal = $('goal').value.trim();
   if (!goal) return;
   if (goal.length > 4000) { notify('Keep your task under 4,000 characters.', true); return; }
@@ -1292,6 +1523,13 @@ $('goal').addEventListener('input', () => { grow(); renderSuggest(); });
 $('goal').addEventListener('blur', () => setTimeout(hideSuggest, 150));
 $('new-chat').addEventListener('click', () => { newChat().catch(e => notify(e.message || 'Could not start a chat.', true)); });
 $('history-btn').addEventListener('click', openHistory);
+$('macros-btn').addEventListener('click', openMacros);
+$('macros-close').addEventListener('click', event => { event.preventDefault(); $('macros-dialog').close(); });
+$('macros-dialog').addEventListener('click', event => { if (event.target === $('macros-dialog')) $('macros-dialog').close(); });
+$('macro-record').addEventListener('click', () => startRecording().catch(e => notify(e.message || 'Could not start recording.', true)));
+$('rec-save').addEventListener('click', () => saveRecording().catch(e => notify(e.message || 'Could not save the macro.', true)));
+$('rec-cancel').addEventListener('click', async () => { await stopRecording(); notify('Recording cancelled.'); });
+$('rec-name').addEventListener('input', () => { if (rec) rec.name = $('rec-name').value; });
 $('history-close').addEventListener('click', event => { event.preventDefault(); $('history-dialog').close(); });
 $('saw-btn').addEventListener('click', openSaw);
 $('saw-close').addEventListener('click', event => { event.preventDefault(); $('saw-dialog').close(); });
@@ -1318,8 +1556,20 @@ task('approve', async () => { const run = workflow; if (!run) throw new Error('S
 $('tabs-refresh').addEventListener('click', async () => { try { await listTabs(); } catch (e) { notify(e.message || 'Could not list tabs.', true); } });
 $('tabs-current').addEventListener('click', async () => { try { const [tab] = await chrome.tabs.query({ active: true, currentWindow: true }); if (!tab?.id) throw new Error('Select a webpage first.'); actingTabId = tab.id; contextIds = contextIds.filter(id => id !== tab.id); renderTabs(); await permission(tab.url); } catch (e) { notify(e.message || 'Something went wrong.', true); } });
 $('reject').addEventListener('click', () => { stop(); notify('Stopped without taking the proposed action.'); });
-$('stop').addEventListener('click', () => { stop(); notify('Workflow stopped. An action already in progress may still finish.'); });
+$('stop').addEventListener('click', () => {
+  if (macroRun) { cancelMacro(); notify('Macro stopped after this step.'); return; }
+  stop(); notify('Workflow stopped. An action already in progress may still finish.');
+});
 $('pause').addEventListener('click', () => {
+  // The same control serves both waits: a paused agent round, and a macro step that needs a value
+  // the recorder deliberately refused to store.
+  if (macroRun) {
+    const resume = macroRun.awaiting;
+    macroRun.awaiting = null;
+    $('pause').hidden = true; $('pause').classList.remove('held');
+    if (resume) { notify('Continuing the macro.'); resume(); }
+    return;
+  }
   const run = workflow;
   if (!run) return;
   if (run.held) { run.resume?.(); notify('Continuing.'); return; }
@@ -1353,8 +1603,10 @@ $('test-worker').addEventListener('click', testConnection);
 $('chat-title').addEventListener('click', openHistory);
 // Escape stops a run and Cmd/Ctrl+K jumps to the box, but a dialog owns Escape while it is open.
 document.addEventListener('keydown', event => {
-  if (event.key === 'Escape' && !document.querySelector('dialog[open]') && workflow) {
-    event.preventDefault(); stop(); notify('Workflow stopped.'); return;
+  if (event.key === 'Escape' && !document.querySelector('dialog[open]') && (workflow || macroRun)) {
+    event.preventDefault();
+    if (macroRun) { cancelMacro(); notify('Macro stopped after this step.'); } else { stop(); notify('Workflow stopped.'); }
+    return;
   }
   if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
     event.preventDefault(); $('goal').focus();
@@ -1374,10 +1626,16 @@ $('timings-clear').addEventListener('click', () => {
   renderTimings();
   notify('Timings cleared.');
 });
-chrome.runtime.onMessage.addListener(message => { if (message && message.type === 'pointerBlocked') notify('Pointer is on, but this page blocks the cursor overlay — the click still went ahead.', true); });
+chrome.runtime.onMessage.addListener((message, sender) => {
+  if (sender?.id && sender.id !== chrome.runtime.id) return;
+  if (message?.type === 'pointerBlocked') { notify('Pointer is on, but this page blocks the cursor overlay — the click still went ahead.', true); return; }
+  // The session is on the envelope: it belongs to the recording, not to the action it describes.
+  if (message?.type === 'macro-event' && rec && message.session === rec.session) onMacroEvent(message.event);
+});
 
 (async () => {
-  const saved = await chrome.storage.local.get(['worker', 'chats', 'activeChat', 'planMode', 'lastShot', 'skills', 'bridge', 'pointer', 'speed', 'slowPages', 'stayPut', 'timings']);
+  const saved = await chrome.storage.local.get(['worker', 'chats', 'activeChat', 'planMode', 'lastShot', 'skills', 'bridge', 'pointer', 'speed', 'slowPages', 'stayPut', 'timings', 'macros']);
+  macros = Array.isArray(saved.macros) ? saved.macros : [];
   $('worker').value = saved.worker || 'https://webagent.amos-donn.workers.dev';
   skills = Array.isArray(saved.skills) ? saved.skills : [];
   $('bridge-toggle').checked = saved.bridge === true;
@@ -1399,5 +1657,7 @@ chrome.runtime.onMessage.addListener(message => { if (message && message.type ==
   plan = chat.plan || [];
   renderChat(); renderPlan();
   if (chat.messages?.length) notify('Restored your last chat. Send a message to keep going, or start a new one.');
+  await resumeRecording();
+  renderMacros();
   listTabs().catch(() => { $('tabs-label').textContent = 'Could not list tabs.'; });
 })();
