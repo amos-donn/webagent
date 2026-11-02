@@ -11,6 +11,36 @@
   // deploy, a button's label usually does not.
   const ORDER = ['testid', 'role', 'label', 'name', 'id', 'text', 'css'];
   const TYPES = ['click', 'fill', 'select', 'key', 'navigate', 'secret', 'switch'];
+  // What a key step is allowed to be. A shortcut only belongs in a macro when replaying it does the
+  // same thing again: Escape closes a dialog, and these commands act on the page rather than on a
+  // caret. Typing, pasting, undoing and selecting inside a field are recorded as that field's value
+  // instead, because replay would depend on a selection the macro never captured and on whatever is
+  // on the clipboard at the time.
+  const KEYS = ['Enter', 'Escape'];
+  const SHORTCUTS = ['A', 'C', 'V', 'X', 'Z', 'Y'];
+  const MODIFIERS = { control: 'Control', ctrl: 'Control', meta: 'Meta', cmd: 'Meta', command: 'Meta', alt: 'Alt', option: 'Alt', shift: 'Shift' };
+  const MODIFIER_ORDER = ['Control', 'Meta', 'Alt', 'Shift'];
+
+  // One spelling for every platform's idea of the same chord, so a stored step reads the same way it
+  // will be pressed.
+  function keySpec(value) {
+    const parts = String(value ?? '').split('+').map(part => part.trim()).filter(Boolean);
+    if (!parts.length || parts.length > 3) return '';
+    const name = parts[parts.length - 1];
+    if (parts.length === 1) return KEYS.includes(name) ? name : '';
+    const modifiers = [];
+    for (const part of parts.slice(0, -1)) {
+      const canonical = MODIFIERS[part.toLowerCase()];
+      if (!canonical || modifiers.includes(canonical)) return '';
+      modifiers.push(canonical);
+    }
+    const letter = name.toUpperCase();
+    if (letter.length !== 1 || !SHORTCUTS.includes(letter)) return '';
+    if (!modifiers.includes('Control') && !modifiers.includes('Meta')) return '';
+    return [...modifiers].sort((a, b) => MODIFIER_ORDER.indexOf(a) - MODIFIER_ORDER.indexOf(b)).concat(letter).join('+');
+  }
+
+  const prettyKey = spec => String(spec ?? '').split('+').map(part => ({ Control: 'Ctrl', Meta: 'Cmd' }[part] || part)).join('+');
   const STEPS = 200;
 
   const clean = (value, max = 160) => String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, max);
@@ -71,7 +101,7 @@
     if (!step) return '';
     if (step.type === 'navigate') return `Open ${host(step.url) || clean(step.url, 60)}`;
     if (step.type === 'switch') return `Switch to ${host(step.url) || clean(step.url, 60)}`;
-    if (step.type === 'key') return `Press ${clean(step.key, 24) || 'a key'}`;
+    if (step.type === 'key') return `Press ${prettyKey(clean(step.key, 24)) || 'a key'}`;
     const candidate = first(step);
     const name = clean(step.label, 70) || clean(candidate?.name, 70) || clean(candidate?.value, 70) || 'the element';
     if (step.type === 'fill') return `Type “${clean(step.text, 40)}” into ${name}`;
@@ -112,7 +142,7 @@
         continue;
       }
       if (raw.type === 'key') {
-        const key = clean(raw.key, 40);
+        const key = keySpec(raw.key);
         if (!key) continue;
         out.push({ type: 'key', key, at: raw.at });
         continue;
@@ -159,5 +189,5 @@
     ].filter(Boolean).join('\n');
   }
 
-  return { ORDER, TYPES, STEPS, rank, append, prune, label, summary, nameFor, recovery, host, pageKey, pageLoose };
+  return { ORDER, TYPES, KEYS, SHORTCUTS, STEPS, rank, append, prune, label, summary, nameFor, recovery, host, pageKey, pageLoose, keySpec };
 });

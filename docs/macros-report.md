@@ -130,6 +130,20 @@ The fix is to treat a tab as a place a page happens to be, not as an identity. T
 
 What this buys is also what it costs: two tabs showing the same page are indistinguishable, so the replay picks the one in the window it is working in; and a macro that ends in a second tab leaves both tabs open afterwards, since closing them is a decision the person should make.
 
+### Keys and shortcuts
+
+The first recorder captured `Enter` and nothing else, which quietly lost every clipboard move, every Escape and every undo. The question is not which keys to log — `keydown` gives all of them — but which ones a replay can honestly repeat.
+
+Three tests decide it. Is the effect on the *page* rather than on a caret? Is it independent of state the macro did not record (a selection, a clipboard)? Does the next step already encode the result?
+
+- **Recorded:** `Enter` in a field (it submits the form), `Escape` anywhere (it closes what is open), and `Control`/`Meta` (+`Shift`) with `A`, `C`, `V`, `X`, `Z`, `Y` when focus is not in a field. These are commands: copy on a page, cut, select-all in a canvas editor, undo, redo.
+- **Not recorded, because the value already says it:** typing, pasting, cutting and undoing *inside* a field. Paste is the pointed example — the input event arrives with the pasted text, so the field's step holds it. Recording `Control+V` as well would both duplicate the text and, worse, paste whatever is on the clipboard at replay time instead of what the person pasted. A field's keystrokes ending in `change`/`blur` are one step by design.
+- **Not recorded, because a replay cannot use it:** `Tab`, arrows, `Home`/`End`, `PageUp`/`PageDown`, and plain letters with only `Shift`. Focus and caret position are not part of a step; the next step names its own target, and a target is scrolled into view before it is clicked. Recording them would add steps that move something invisible and do nothing.
+
+Replay was already able to press these: `pressKey` in the background splits a spec like `Control+A`, maps aliases (`ctrl`, `cmd`, `option`) to modifier bits and dispatches `keyDown`/`keyUp` with `Input.dispatchKeyEvent`, which is how the agent's own `replace` typing already worked. The recorder spells the modifier the way the platform does — `Meta` on a Mac, `Control` elsewhere — so the replay presses the key the person actually pressed. `Macros.keySpec` is the single place that normalises and vets a spec, and `prune` drops anything it does not recognise, so a malformed or unsupported key can never reach storage.
+
+What this deliberately does not do: replay a paste of content from outside the browser. If text was pasted into a canvas or a non-editable region, there is nothing to type it into, and the macro simply will not reproduce it.
+
 ## 4. Risks and what would prove them wrong
 
 | Risk | Mitigation in 1.3.0 | What would show it failing |

@@ -130,6 +130,31 @@ test('a switch step survives pruning only when it names a web page', () => {
   assert.equal(steps[0].url, 'https://example.com/a');
 });
 
+test('a shortcut is stored the way it will be pressed, and only when it means something', () => {
+  assert.equal(Macros.keySpec('ctrl+c'), 'Control+C');
+  assert.equal(Macros.keySpec('cmd+shift+z'), 'Meta+Shift+Z');
+  assert.equal(Macros.keySpec('Shift+Control+Y'), 'Control+Shift+Y', 'modifier order is normalised');
+  assert.equal(Macros.keySpec('Enter'), 'Enter');
+  assert.equal(Macros.keySpec('Escape'), 'Escape');
+  assert.equal(Macros.keySpec('Tab'), '', 'moving focus is not something a replay can repeat');
+  assert.equal(Macros.keySpec('Control+Q'), '', 'only commands a page can see again are kept');
+  assert.equal(Macros.keySpec('Shift+C'), '', 'a capital letter with no command modifier is typing');
+  assert.equal(Macros.keySpec('Control+Control+C'), '', 'a repeated modifier is malformed');
+  assert.equal(Macros.keySpec(''), '');
+});
+
+test('a key step keeps Escape and copy, and drops keys a replay cannot repeat', () => {
+  const steps = Macros.prune([
+    { type: 'key', key: 'Tab' },
+    { type: 'key', key: 'ctrl+c' },
+    { type: 'key', key: 'Escape' },
+    { type: 'click', target: [save()], label: 'Save' }
+  ]);
+  assert.deepEqual(steps.map(step => step.key ?? step.type), ['Control+C', 'Escape', 'click']);
+  assert.deepEqual(steps.slice(0, 2).map(Macros.label), ['Press Ctrl+C', 'Press Escape']);
+  assert.equal(Macros.label({ type: 'key', key: 'Meta+Z' }), 'Press Cmd+Z', 'the label uses this platform\'s name');
+});
+
 test('a page is recognised by address, ignoring the fragment and a trailing slash', () => {
   assert.equal(Macros.pageKey('https://Example.com/inbox/?q=1#top'), Macros.pageKey('https://example.com/inbox?q=1'));
   assert.equal(Macros.pageLoose('https://example.com/inbox?q=1'), Macros.pageLoose('https://example.com/inbox/?q=2'));

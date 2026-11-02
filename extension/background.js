@@ -794,13 +794,34 @@ function installRecorder(session) {
     if (isEditable(el)) flush();
   };
   const onFocus = event => { const el = event.target; if (isEditable(el)) state.field = el; };
+  // A keystroke is a step when replaying it does the same thing again: submitting a field, closing a
+  // dialog, or a command aimed at the page rather than at a caret. Inside a field, typing, pasting,
+  // undoing and selecting all end up in that field's recorded value, and replaying the shortcut would
+  // depend on a selection the macro never captured and on whatever is on the clipboard at the time.
+  const SHORTCUT_KEYS = ['a', 'c', 'v', 'x', 'z', 'y'];
+  const shortcut = event => {
+    if (!/^[a-z]$/i.test(event.key) || !SHORTCUT_KEYS.includes(event.key.toLowerCase())) return '';
+    if (event.altKey || (!event.ctrlKey && !event.metaKey)) return '';
+    // Spelled as this platform spells it, so a replay presses the modifier the person actually used.
+    return `${event.metaKey ? 'Meta' : 'Control'}${event.shiftKey ? '+Shift' : ''}+${event.key.toUpperCase()}`;
+  };
   const onKey = event => {
-    if (!event.isTrusted || event.key !== 'Enter') return;
+    if (!event.isTrusted || event.repeat) return;
     const el = event.target;
-    if (!isEditable(el) && el?.tagName !== 'SELECT') return;
-    // Enter in a field submits its form; recording the key keeps that behaviour instead of guessing.
-    flush();
-    send({ type: 'key', key: 'Enter' });
+    const field = isEditable(el) || el?.tagName === 'SELECT';
+    if (event.key === 'Enter') {
+      if (!field) return;
+      // Enter in a field submits its form; recording the key keeps that behaviour instead of guessing.
+      flush();
+      send({ type: 'key', key: 'Enter' });
+      return;
+    }
+    // Escape closes a dialog or cancels a drag wherever the focus sits, and what was typed before it is
+    // already a step of its own.
+    if (event.key === 'Escape') { flush(); send({ type: 'key', key: 'Escape' }); return; }
+    if (field) return;
+    const key = shortcut(event);
+    if (key) send({ type: 'key', key });
   };
   const onHide = () => { if (document.hidden) flush(); };
   const onPageHide = () => flush();
