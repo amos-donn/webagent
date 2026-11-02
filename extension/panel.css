@@ -68,7 +68,6 @@ button.plan-mark:hover { opacity: .75; }
 .tab-pill.acting{background:#eef4e9;border-color:#cfe0c7;color:#2c5948}
 .tab-pill.acting .ph{color:#2c5948}
 .tab-pill.context{background:#fbfdf8;border-style:dashed;cursor:default}
-.tab-pill.add{background:transparent;border-style:dashed;color:#74876f;font-weight:600}
 .tab-drop{display:grid;place-items:center;background:none;border:0;padding:0;margin-left:1px;color:#a3b0a2;cursor:pointer;border-radius:50%}
 .tab-drop:hover{color:#96443a}
 .tab-tag.agent{background:#eef4e9;color:#3b5a45}

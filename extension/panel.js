@@ -192,7 +192,8 @@ function tabPill(text, icon, className, title) {
   pill.lastChild.textContent = text;
   return pill;
 }
-// The strip above the box: what the agent acts in, what it can read, and a way into the full list.
+// The strip above the box: what the agent acts in and what it can read. No "add a tab" button — @ in
+// the message box attaches a tab, and the agent can pull other tabs in itself when a task needs them.
 function renderTabStrip() {
   const strip = $('tab-strip');
   if (!strip) return;
@@ -214,9 +215,6 @@ function renderTabStrip() {
     pill.append(drop);
     strip.append(pill);
   }
-  const add = tabPill(contextIds.length ? 'Tabs' : 'Add a tab', 'chats-circle', 'add', 'Choose which tab the agent acts in, and which it can read');
-  add.addEventListener('click', toggleTabsBox);
-  strip.append(add);
   strip.hidden = false;
 }
 function toggleTabsBox() {

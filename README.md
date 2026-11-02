@@ -41,11 +41,11 @@ The message box is one tall field with the send button inside it, and nothing el
 The agent drives one tab at a time, and it can move between them. Every open tab is listed to the model with a short id (`t1`, `t2`) and a marker for whether it is the acting tab, a read-only context tab, or a tab this run opened. Four actions use that list:
 
 - **open** — `{"type":"open","url":"https://…"}` or `{"query":"standing desk prices"}` opens a new tab, activates it, adds it to the `webagent` tab group and acts there from the next round. It is how the agent researches a second site, reads a source, or visits a page the task needs next without navigating away from the page it is working in.
-- **focus** — switches the acting tab back to one from the list, so research in a new tab, then acting back in the original document, is one run rather than two chats.
+- **switch** — switches the acting tab to one to one from the list, so research in a new tab, then acting back in the original document, is one run rather than two chats.
 - **gather** — reads one to five tabs in a single call and returns their text as the step result; the model then compares, cites or fills from all of them without switching per tab.
 - **close** — closes a tab, and only one the run itself opened. The user's own tabs are never closed, and three new tabs is the ceiling for one task.
 
-Tab ids stay stable for the whole run, so `t3` in round eight still means the tab it meant in round one. The tab strip above the message box shows the acting tab and the context tabs as pills; clicking a pill opens the full tab list, and the `×` on a context pill drops it. The tab list marks tabs the run opened with an `agent` badge.
+Tab ids stay stable for the whole run, so `t3` in round eight still means the tab it meant in round one. The tab strip above the message box shows the acting tab and the context tabs as pills; clicking the acting pill opens the full tab list, `@` in the message box attaches another tab, and the `×` on a context pill drops it. The tab list marks tabs the run opened with an `agent` badge.
 
 ## Action standards
 
