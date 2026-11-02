@@ -62,6 +62,7 @@ Three settings decide how long a round takes, and all three are in **Settings**:
 
 - **Speed.** *Fast* (the default) asks `gemini-3.5-flash-lite`, uses short pauses between actions, and sends a smaller observation — 50 refs, 14,000 characters of page text, 4,000 per attached tab. *Balanced* uses `gemini-3.6-flash` with a medium observation. *Careful* is the old behaviour: `gemini-3.8-flash` with the full 220 refs and the whole page, which thinks for several seconds per decision.
 - **Wait for slow pages before deciding.** Off by default, so a click gets 0.8 s to change the page and the run moves on. On, an action waits until the page stops mutating, up to four seconds — worth it on sites whose menus open late, at the cost of time on a page that does nothing.
+- **Stay on my tab.** On by default. The agent keeps driving its tab without making it the visible one, so you can read another tab while a run continues. Turn it off to watch every action, at the cost of being switched back on each round.
 - **Show pointer** and **Local bridge**, unchanged.
 
 The setting applies from the next action; a run already in flight keeps the speed it started with until the next round. A model that errors falls back to the next one down the chain rather than ending the run, and `GEMINI_MODEL`, when set, overrides the speed setting entirely.

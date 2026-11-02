@@ -75,7 +75,7 @@ These are the parts that would bite, and each has a cheap fix:
 - **Injection can fail.** Some pages block `chrome.scripting.executeScript`. Every call must degrade silently (`.catch(() => {})`), which is already the house style for `writeBoxShow` / `writeBoxHide`.
 - **Respect `prefers-reduced-motion`.** `panel.css` already disables animations under that media query; the overlay should do the same (jump straight to the point, keep the ring static or skip it).
 - **Don't collide with the write box.** A `write` action currently draws the purple outline and "Gemini is writing…" chip. Park the cursor at the field and let the box take over; two purple overlays stacked on one field look like a bug.
-- **Per-tab, not global.** `actOnTab` activates the tab before acting, so the cursor appears in the tab being driven. Tabs are switched explicitly by the agent (`observe`/`act` with `tabId`), so no cross-tab ghost is needed.
+- **Per-tab, not global.** The overlay is drawn in the tab being driven; the run no longer activates that tab before acting, so the cursor is there when you look at it but the agent does not pull you away from what you are doing. Tabs are switched explicitly by the agent (`observe`/`act` with `tabId`), so no cross-tab ghost is needed.
 - **Frames.** Clicks already land in the top frame only (coordinates come from the top-frame viewport), so a top-frame overlay is always in the right coordinate space.
 - **It is not evidence.** The overlay shows intent, not proof. Keep `effect.verified` from the fingerprint as the record of what actually happened; the chrome-devtools-mcp thread makes this point sharply — a visual cue must not be read as confirmation that a target was hit.
 

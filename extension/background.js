@@ -770,11 +770,12 @@ async function handle(message) {
     const tab = message.tabId ? await getTab(message.tabId) : (await chrome.tabs.query({ active: true, currentWindow: true }))[0];
     if (!tab?.id || !tab.url) throw new Error('Select a webpage first.');
     if (!permitted(tab.url)) throw new Error('Select an HTTPS page (or a local development page). Chrome internal pages are not supported.');
-    if (message.activate) { await chrome.tabs.update(tab.id, { active: true }); await sleep(350); }
+    if (message.stayPut === false && !tab.discarded) { await chrome.tabs.update(tab.id, { active: true }); await sleep(350); }
     const fresh = await getTab(tab.id);
     // Only one debugger session per tab at a time, so the screenshot and the tree are captured in series.
     const page = await readPage(fresh.id);
-    const shot = await shoot(fresh.id);
+    // A hidden tab can refuse a paint, and a missing screenshot is not a reason to drop the round.
+    const shot = await shoot(fresh.id).catch(() => ({}));
     const ax = await axSnapshot(fresh.id).catch(() => ({ refs: [], text: '' }));
     await saveRefs(fresh.id, fresh.url, ax.refs);
     return { tabId: fresh.id, url: fresh.url, title: page.title, text: page.text, elements: page.elements, refs: ax.refs.map(({ backend, ...rest }) => rest), ...shot };
@@ -787,8 +788,10 @@ async function handle(message) {
     const action = message.action;
     if (action?.type === 'think') return {};
     if (!action || !['click', 'type', 'write', 'read', 'scroll', 'wait', 'navigate', 'key', 'fill'].includes(action.type)) throw new Error('Unknown action.');
-    await chrome.tabs.update(tab.id, { active: true });
-    await sleep(250);
+    // Do not steal focus. Once the debugger is attached Chrome delivers input events and
+    // screenshots to a tab nobody is looking at, so the run can continue while you work elsewhere.
+    // A discarded tab has to be loaded before it can be driven, and that needs the tab shown.
+    if (message.stayPut === false || tab.discarded) { await chrome.tabs.update(tab.id, { active: true }); await sleep(250); }
     const fresh = await getTab(tab.id);
     if (!samePage(fresh.url, message.url)) fail('PAGE_CHANGED', 'That page changed. Observe it again.');
     return actOnTab(fresh, action, message);

@@ -22,7 +22,7 @@ let tabCache = [], actingTabId = null, contextIds = [];
 let mode = 'autopilot', planMode = 'auto', lastShot = '', skills = [];
 // Speed moves the model and the pauses together: a light model answers in about a second, so a
 // 600 ms pause between actions is most of the wait. Careful is the old behaviour.
-let speed = 'fast', slowPages = false;
+let speed = 'fast', slowPages = false, stayPut = true;
 const PACING = { fast: 120, balanced: 400, careful: 800 };
 const SETTLE_MS = { fast: 800, balanced: 2200, careful: 4000 };
 const pace = () => PACING[speed] || PACING.balanced;
@@ -445,7 +445,7 @@ async function next(run, prefetched) {
   try { await permission(); }
   catch (e) { if (workflow !== run) return; halt(run, e.message); return; }
   let shot = prefetched;
-  if (!shot) { loading(`Reading ${shortTitle(acting)}`, 'eye'); shot = await timed(send('observe', { tabId: acting.id, activate: true }), OBSERVE_TIMEOUT, `Reading ${shortTitle(acting)} took too long — the tab may be stuck or closed.`); if (workflow !== run) return; }
+  if (!shot) { loading(`Reading ${shortTitle(acting)}`, 'eye'); shot = await timed(send('observe', { tabId: acting.id, stayPut }), OBSERVE_TIMEOUT, `Reading ${shortTitle(acting)} took too long — the tab may be stuck or closed.`); if (workflow !== run) return; }
   const hash = textHash(shot.text);
   run.stalled = hash === run.lastHash ? (run.stalled || 0) + 1 : 0;
   run.apiRetries = 0;
@@ -583,7 +583,7 @@ async function executeOne(run, current) {
         pushMessage('note', `Extended this task to ${new URL(action.url).hostname}.`);
       }
     }
-    result = await send('act', { ...current, settleMs: settleFor(), goal: run.goal, intent: [run.goal, ...plan.map(item => item.title)].join('\n'), allow: run.allow, automatic: run.mode === 'autopilot' });
+    result = await send('act', { ...current, settleMs: settleFor(), stayPut, goal: run.goal, intent: [run.goal, ...plan.map(item => item.title)].join('\n'), allow: run.allow, automatic: run.mode === 'autopilot' });
   }
   catch (error) {
     if (workflow !== run) return 'stop';
@@ -636,7 +636,7 @@ async function startWorkflow(goal, skill) {
   $('start').hidden = true; $('stop').hidden = false; $('goal').disabled = true;
   loading('Reading the page', 'eye');
   try {
-    const observed = timed(send('observe', { tabId: acting.id, activate: true }), OBSERVE_TIMEOUT, 'Reading the page took too long — the tab may be stuck or closed.');
+    const observed = timed(send('observe', { tabId: acting.id, stayPut }), OBSERVE_TIMEOUT, 'Reading the page took too long — the tab may be stuck or closed.');
     if (planMode === 'never') {
       const shot = await observed;
       if (workflow !== run) return;
@@ -793,10 +793,15 @@ $('slow-toggle').addEventListener('change', async () => {
   await chrome.storage.local.set({ slowPages });
   notify(slowPages ? 'Waiting up to four seconds for a slow menu before calling an action a failure.' : 'Deciding quickly. A slow menu may look like a failed click.');
 });
+$('stay-toggle').addEventListener('change', async () => {
+  stayPut = $('stay-toggle').checked;
+  await chrome.storage.local.set({ stayPut });
+  notify(stayPut ? 'Working in the background — switch tabs freely.' : 'Switching to the working tab before each action.');
+});
 chrome.runtime.onMessage.addListener(message => { if (message && message.type === 'pointerBlocked') notify('Pointer is on, but this page blocks the cursor overlay — the click still went ahead.', true); });
 
 (async () => {
-  const saved = await chrome.storage.local.get(['worker', 'chats', 'activeChat', 'planMode', 'lastShot', 'skills', 'bridge', 'pointer', 'speed', 'slowPages']);
+  const saved = await chrome.storage.local.get(['worker', 'chats', 'activeChat', 'planMode', 'lastShot', 'skills', 'bridge', 'pointer', 'speed', 'slowPages', 'stayPut']);
   $('worker').value = saved.worker || 'https://webagent.amos-donn.workers.dev';
   skills = Array.isArray(saved.skills) ? saved.skills : [];
   $('bridge-toggle').checked = saved.bridge === true;
@@ -805,6 +810,8 @@ chrome.runtime.onMessage.addListener(message => { if (message && message.type ==
   slowPages = saved.slowPages === true;
   $('speed').value = speed;
   $('slow-toggle').checked = slowPages;
+  stayPut = saved.stayPut !== false;
+  $('stay-toggle').checked = stayPut;
   planMode = ['auto', 'always', 'never'].includes(saved.planMode) ? saved.planMode : 'auto';
   lastShot = saved.lastShot || '';
   $('saw-btn').hidden = !lastShot;
