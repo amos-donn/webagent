@@ -94,7 +94,9 @@ The setting applies from the next action; a run already in flight keeps the spee
 
 ## What a round costs
 
-The hourglass button in the topbar (and `/timings`) opens the speed panel: what the last 60 rounds actually spent, as medians with a stacked bar and the last eight rounds listed, exportable as `mezze-timings.json`. Each decision also prints a faint line in the timeline under the steps it paid for — `1.24s · read 380ms · model 700ms · act 160ms` — and every step card carries its own duration. What is measured:
+The hourglass button in the topbar (and `/timings`) opens the speed panel: how long whole tasks take, then what the last 60 rounds actually spent, as medians with a stacked bar and the last rounds listed, exportable as `mezze-timings.json`.
+
+Both levels are recorded, because they answer different questions. A **task** record is written once per run — wall clock from the moment you send to the moment the report appears, so it includes the pauses while you approve a step and the settle windows, which is the wait you actually sit through — with its round count and the summed read/model/act underneath. A **round** record covers one decision. Each decision prints a faint line in the timeline under the steps it paid for — `1.24s · read 380ms · model 700ms · act 160ms` — and the end of a run prints `task 1m 12s · 9 rounds · model 4.1s · read 12s · act 38s`. Every step card carries its own duration. What is measured:
 
 - **read** — the observation round trip, including a second read when a screenshot had to be taken
 - **model** — the Worker's own timing of the Gemini call, including its internal correction retry
@@ -102,7 +104,7 @@ The hourglass button in the topbar (and `/timings`) opens the speed panel: what 
 - **act** — the CDP action and its effect check, settle window included
 - **payload** — the exact byte count of the JSON sent to `/agent`, plus whether the round carried a screenshot and the Worker's prompt/completion token counts
 
-One record is written per decision, capped at 400 in extension storage, and the first round of a run reports `read` as unknown rather than zero because its observation is taken alongside the planner. This is the baseline the System 1 question in [docs/jev-pivot-report.md](docs/jev-pivot-report.md) depends on: replacing a model call only shortens a round by the model's share of it, and until these numbers exist that share is a guess.
+One round record is written per decision and one task record per run, capped at 400 together in extension storage, and the first round of a run reports `read` as unknown rather than zero because its observation is taken alongside the planner. This is the baseline the System 1 question in [docs/jev-pivot-report.md](docs/jev-pivot-report.md) depends on: replacing a model call only shortens a round by the model's share of it, and until these numbers exist that share is a guess.
 
 ## Accessibility refs, safety boundary, skills, evals and the MCP bridge
 

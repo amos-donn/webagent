@@ -64,7 +64,50 @@ function flushTiming(run) {
   run.timing = null;
   record.total = [record.observeMs, record.modelMs, record.netMs, record.actionMs].reduce((sum, value) => sum + (Number(value) || 0), 0);
   logTiming(record);
+  spend(run, record);
   return record;
+}
+// Rounds bounce between four clocks and the model; the user waited for one task. Fold each closed
+// round into the run so the total is the sum of what was actually attributed, not a guess.
+function spend(run, record) {
+  if (!run || !record) return;
+  const total = run.spent = run.spent || { total: 0, observeMs: 0, modelMs: 0, netMs: 0, actionMs: 0, rounds: 0, tokensIn: 0, tokensOut: 0, shots: 0 };
+  total.total += Number(record.total) || 0;
+  for (const key of ['observeMs', 'modelMs', 'netMs', 'actionMs']) total[key] += Number(record[key]) || 0;
+  total.rounds += 1;
+  total.tokensIn += record.tokens?.in || 0;
+  total.tokensOut += record.tokens?.out || 0;
+  if (record.image) total.shots += 1;
+}
+// One record per task, closed on every way a run can end. Wall clock, so it includes the pauses for
+// your approval and the settle windows — that is the wait being measured. Guarded by taskLogged
+// because the report path closes the task before stop() runs.
+function finishTask(run, status = 'done') {
+  if (!run || run.taskLogged) return null;
+  run.taskLogged = true;
+  const endedAt = Date.now();
+  const startedAt = run.taskStart || endedAt;
+  const spent = run.spent || {};
+  const record = {
+    kind: 'task', status, chatId: run.chatId || null,
+    goal: String(run.goal || '').slice(0, 80),
+    startedAt, endedAt, total: Math.max(0, endedAt - startedAt),
+    rounds: spent.rounds || 0, steps: (run.steps || []).length,
+    observeMs: spent.observeMs || 0, modelMs: spent.modelMs || 0,
+    netMs: spent.netMs || 0, actionMs: spent.actionMs || 0,
+    tokensIn: spent.tokensIn || 0, tokensOut: spent.tokensOut || 0, shots: spent.shots || 0,
+    speed
+  };
+  logTiming(record);
+  return record;
+}
+function taskLine(record) {
+  if (!record) return '';
+  const parts = [`task ${elapsedLabel(record.total)}`, `${record.rounds} round${record.rounds === 1 ? '' : 's'}`];
+  if (record.modelMs) parts.push(`model ${elapsedLabel(record.modelMs)}`);
+  if (record.observeMs) parts.push(`read ${elapsedLabel(record.observeMs)}`);
+  if (record.actionMs) parts.push(`act ${elapsedLabel(record.actionMs)}`);
+  return parts.join(' · ');
 }
 function noteActionMs(run, started, type) {
   const record = run?.timing;
@@ -75,7 +118,7 @@ function noteActionMs(run, started, type) {
 }
 const median = values => { const list = values.filter(value => Number.isFinite(value)).sort((a, b) => a - b); if (!list.length) return 0; const mid = Math.floor(list.length / 2); return list.length % 2 ? list[mid] : Math.round((list[mid - 1] + list[mid]) / 2); };
 const p90 = values => { const list = values.filter(value => Number.isFinite(value)).sort((a, b) => a - b); return list.length ? list[Math.min(list.length - 1, Math.ceil(list.length * 0.9) - 1)] : 0; };
-const elapsedLabel = ms => { const value = Number(ms) || 0; return value >= 1000 ? `${(value / 1000).toFixed(2)}s` : `${Math.max(1, Math.round(value))}ms`; };
+const elapsedLabel = ms => { const value = Math.max(0, Math.round(Number(ms) || 0)); if (value >= 60000) { const minutes = Math.floor(value / 60000); return `${minutes}m ${Math.round((value % 60000) / 1000)}s`; } return value >= 1000 ? `${(value / 1000).toFixed(2)}s` : `${Math.max(1, value)}ms`; };
 // One faint line per decision, under the steps it paid for: the whole point of logging is that the
 // wait is attributable without opening anything.
 function roundLine(record) {
@@ -114,39 +157,69 @@ function renderTimings() {
   const body = $('timings-body');
   if (!body) return;
   body.textContent = '';
-  const list = timings.slice(-60);
-  if (!list.length) {
+  // Task records live in the same array so one export and one clear cover both; they are kept out of
+  // the round medians, because a task has no read/model/act split of its own.
+  const tasks = timings.filter(record => record.kind === 'task');
+  const list = timings.filter(record => record.kind !== 'task').slice(-60);
+  if (!list.length && !tasks.length) {
     const p = document.createElement('p'); p.className = 'timings-empty';
-    p.textContent = 'No rounds logged yet. Run a task and this fills in.';
+    p.textContent = 'Nothing logged yet. Run a task and this fills in.';
     body.append(p); return;
   }
-  const stats = timingStats(list);
+  const stats = list.length ? timingStats(list) : null;
   const row = (label, value) => {
     const div = document.createElement('div'); div.className = 'timing-stat';
     const a = document.createElement('span'); a.textContent = label;
     const b = document.createElement('span'); b.textContent = value;
     div.append(a, b); return div;
   };
-  body.append(row(`Median round · ${list.length} logged`, elapsedLabel(stats.total)));
-  body.append(row('90% finish under', elapsedLabel(stats.slow)));
-  body.append(row('Model · share of the round', `${elapsedLabel(stats.model)} · ${stats.share}%`));
-  body.append(row('Screenshots', `${stats.shots} of ${list.length} rounds`));
-  body.append(row('Payload · tokens', `${Math.round(stats.bytes / 1024)} KB · ${(stats.tokensIn / 1000).toFixed(1)}k in / ${(stats.tokensOut / 1000).toFixed(1)}k out`));
-  const bar = document.createElement('div'); bar.className = 'timing-bar';
-  const sum = stats.read + stats.model + stats.net + stats.act || 1;
-  for (const [value, color, name] of [[stats.read, 'var(--accent)', 'read'], [stats.model, 'var(--ink)', 'model'], [stats.net, 'var(--faint)', 'network'], [stats.act, 'var(--line-strong)', 'act']]) {
-    const seg = document.createElement('i');
-    seg.style.width = `${value / sum * 100}%`; seg.style.background = color; seg.title = `${name} ${elapsedLabel(value)}`;
-    bar.append(seg);
+  if (tasks.length) {
+    const totals = tasks.map(record => record.total);
+    body.append(row(`Median task · ${tasks.length} logged`, elapsedLabel(median(totals))));
+    body.append(row('Slowest task', elapsedLabel(Math.max(...totals))));
   }
-  body.append(bar);
-  const legend = document.createElement('div'); legend.className = 'timing-legend';
-  for (const [color, name] of [['var(--accent)', 'read'], ['var(--ink)', 'model'], ['var(--faint)', 'network'], ['var(--line-strong)', 'act']]) {
-    const item = document.createElement('b');
-    const dot = document.createElement('em'); dot.style.background = color;
-    item.append(dot, document.createTextNode(name)); legend.append(item);
+  if (list.length) body.append(row(`Median round · ${list.length} logged`, elapsedLabel(stats.total)));
+  if (stats) {
+    body.append(row('90% finish under', elapsedLabel(stats.slow)));
+    body.append(row('Model · share of the round', `${elapsedLabel(stats.model)} · ${stats.share}%`));
+    body.append(row('Screenshots', `${stats.shots} of ${list.length} rounds`));
+    body.append(row('Payload · tokens', `${Math.round(stats.bytes / 1024)} KB · ${(stats.tokensIn / 1000).toFixed(1)}k in / ${(stats.tokensOut / 1000).toFixed(1)}k out`));
+    const bar = document.createElement('div'); bar.className = 'timing-bar';
+    const sum = stats.read + stats.model + stats.net + stats.act || 1;
+    for (const [value, color, name] of [[stats.read, 'var(--accent)', 'read'], [stats.model, 'var(--ink)', 'model'], [stats.net, 'var(--faint)', 'network'], [stats.act, 'var(--line-strong)', 'act']]) {
+      const seg = document.createElement('i');
+      seg.style.width = `${value / sum * 100}%`; seg.style.background = color; seg.title = `${name} ${elapsedLabel(value)}`;
+      bar.append(seg);
+    }
+    body.append(bar);
+    const legend = document.createElement('div'); legend.className = 'timing-legend';
+    for (const [color, name] of [['var(--accent)', 'read'], ['var(--ink)', 'model'], ['var(--faint)', 'network'], ['var(--line-strong)', 'act']]) {
+      const item = document.createElement('b');
+      const dot = document.createElement('em'); dot.style.background = color;
+      item.append(dot, document.createTextNode(name)); legend.append(item);
+    }
+    body.append(legend);
   }
-  body.append(legend);
+  if (tasks.length) {
+    const head = document.createElement('p'); head.className = 'overline'; head.textContent = 'Tasks';
+    body.append(head);
+    const taskList = document.createElement('div'); taskList.className = 'round-list';
+    for (const record of tasks.slice(-6).reverse()) {
+      const item = document.createElement('div'); item.className = 'round-row';
+      const total = document.createElement('b'); total.textContent = elapsedLabel(record.total);
+      const meta = document.createElement('span');
+      const bits = [`${record.rounds} round${record.rounds === 1 ? '' : 's'}`];
+      if (record.modelMs) bits.push(`model ${elapsedLabel(record.modelMs)}`);
+      bits.push(record.status === 'done' ? 'checked' : record.status === 'unchecked' ? 'unchecked' : 'stopped');
+      meta.textContent = bits.join(' · ');
+      item.title = record.goal || '';
+      item.append(total, meta); taskList.append(item);
+    }
+    body.append(taskList);
+  }
+  if (!list.length) return;
+  const head = document.createElement('p'); head.className = 'overline'; head.textContent = 'Rounds';
+  body.append(head);
   const rounds = document.createElement('div'); rounds.className = 'round-list';
   for (const record of list.slice(-8).reverse()) {
     const item = document.createElement('div'); item.className = 'round-row';
@@ -299,7 +372,9 @@ async function finalCheck(run, claim, incomplete = []) {
     return;
   }
   if (closing) pushMessage('timing', roundLine(closing));
+  const ended = finishTask(run, report.verdict === 'passed' ? 'done' : 'unchecked');
   pushMessage('report', reportText(report), { report });
+  if (ended) pushMessage('timing', taskLine(ended));
   renderPlan();
   stop();
   notify(report.verdict === 'passed' ? 'Finished, and the result checked out.' : 'Finished without full confirmation — see the report.', report.verdict !== 'passed');
@@ -547,9 +622,13 @@ function exportChat() {
 /* ---------- workflow ---------- */
 function stop() {
   flushTiming(workflow);
+  // Every ending funnels through here: report, halt, stop button, step limit. The report path closes
+  // the task first, so this only fires for the others.
+  const ended = finishTask(workflow, 'stopped');
   workflow = null; proposal = null; currentAction(null);
   $('approval').hidden = true; $('stop').hidden = true; $('start').hidden = false;
   $('goal').disabled = false; $('loading').hidden = true;
+  if (ended && chat?.id === ended.chatId) pushMessage('timing', taskLine(ended));
   renderPlan(); renderSkillChip(); persist().catch(() => {});
 }
 function loading(label, icon = 'spinner-gap') {
@@ -935,7 +1014,7 @@ async function startWorkflow(goal, skill) {
   // A clicked or named skill wins; otherwise a Google page plus summarising words picks it up by itself.
   const chosen = skill || builtinFor(acting.url, goal);
   chat.goal = goal; chat.title = goal.slice(0, 60);
-  workflow = { goal, skill: chosen || null, steps: [], mode, actingTabId: acting.id, homeTabId: acting.id, contextIds: [...contextIds], opened: [], tokens: {}, tokenSeq: 0, stalled: 0, lastHash: '', queue: [], evidence: 0, unproven: 0, recovered: 0, retries: 0, apiRetries: 0, keepGoing: 0, allow: [new URL(acting.url).origin], memory: null, wantShot: false, contextTabs: [], warned: [] };  const run = workflow;
+  workflow = { goal, skill: chosen || null, steps: [], mode, taskStart: Date.now(), chatId: chat.id, spent: null, actingTabId: acting.id, homeTabId: acting.id, contextIds: [...contextIds], opened: [], tokens: {}, tokenSeq: 0, stalled: 0, lastHash: '', queue: [], evidence: 0, unproven: 0, recovered: 0, retries: 0, apiRetries: 0, keepGoing: 0, allow: [new URL(acting.url).origin], memory: null, wantShot: false, contextTabs: [], warned: [] };  const run = workflow;
   plan = [];
   pushMessage('user', goal);
   if (chosen) pushMessage('note', `Using the built-in “${chosen.name}” skill for this page.`);
