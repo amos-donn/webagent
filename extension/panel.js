@@ -236,7 +236,14 @@ function renderTimings() {
 }
 function openTimings() { renderTimings(); if (!$('timings-dialog').open) $('timings-dialog').showModal(); }
 
-function notify(text, error = false) { $('notice').textContent = text; $('notice').classList.toggle('error', error); $('notice').hidden = false; }
+function notify(text, error = false) {
+  const box = $('notice');
+  // role=status is already polite; a failure interrupts instead of waiting its turn.
+  box.setAttribute('role', error ? 'alert' : 'status');
+  box.textContent = text;
+  box.classList.toggle('error', error);
+  box.hidden = false;
+}
 function baseUrl() { const url = new URL($('worker').value.trim()); if (url.username || url.password || url.search || url.hash || (url.protocol !== 'https:' && !(url.protocol === 'http:' && ['localhost','127.0.0.1'].includes(url.hostname)))) throw new Error('Use an HTTPS Worker URL or localhost.'); return url.origin + url.pathname.replace(/\/$/, ''); }
 // Ask once for every site, not once per site: Chrome remembers this grant until you revoke it.
 const ALL_SITES = ['https://*/*', 'http://*/*'];
@@ -449,8 +456,17 @@ function renderChatTitle() {
   label.textContent = title && title !== 'New chat' ? title : 'agent';
   label.title = title ? `${title} — open chats` : 'Open chats';
 }
-function newChatRecord() { return { id: crypto.randomUUID(), title: 'New chat', goal: '', messages: [], plan: [], steps: [], at: Date.now() }; }
+function newChatRecord() { return { id: crypto.randomUUID(), title: 'New chat', goal: '', messages: [], plan: [], steps: [], done: [], at: Date.now() }; }
+let persistTimer = 0, saveWarned = false;
+// Every step used to write the whole chat list to storage immediately. A trailing write collapses a
+// burst of them into one, and a failure is said out loud instead of being swallowed: a chat that
+// stops saving without a word is a transcript lost.
+function schedulePersist() {
+  if (persistTimer) return;
+  persistTimer = setTimeout(() => { persistTimer = 0; persist().catch(() => {}); }, 250);
+}
 async function persist() {
+  if (persistTimer) { clearTimeout(persistTimer); persistTimer = 0; }
   if (!chat) return;
   renderChatTitle();
   chat.plan = plan;
@@ -459,8 +475,17 @@ async function persist() {
   chat.at = Date.now();
   const index = chats.findIndex(item => item.id === chat.id);
   if (index === -1) chats.unshift(chat); else chats[index] = chat;
-  chats = chats.slice(0, MAX_CHATS);
-  await chrome.storage.local.set({ chats, activeChat: chat.id });
+  if (chats.length > MAX_CHATS) {
+    // The cap used to drop the oldest chat without a word.
+    const dropped = chats.splice(MAX_CHATS);
+    notify(`Only the newest ${MAX_CHATS} chats are kept, so the oldest ${dropped.length === 1 ? 'one was' : `${dropped.length} were`} removed. Export a chat to keep a copy.`, true);
+  }
+  try {
+    await chrome.storage.local.set({ chats, activeChat: chat.id });
+    saveWarned = false;
+  } catch (e) {
+    if (!saveWarned) { saveWarned = true; notify(`This browser refused the save (${e?.message || 'storage may be full'}). Export the chat to keep a copy.`, true); }
+  }
 }
 function welcome() {
   const box = document.createElement('div'); box.className = 'welcome';
@@ -532,7 +557,7 @@ function pushMessage(role, text, extra = {}) {
   const el = renderMessage(message);
   $('steps').append(el);
   el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-  persist().catch(() => {});
+  schedulePersist();
 }
 function renderPlan() {
   const box = $('plan-box'), list = $('plan-list');
@@ -548,7 +573,7 @@ function renderPlan() {
     const mark = document.createElement('button'); mark.type = 'button'; mark.className = 'plan-mark'; setIcon(mark, item.done ? 'check' : 'circle', 13);
     mark.title = item.done ? 'Mark as not done' : 'Mark as done';
     mark.setAttribute('aria-label', `${mark.title}: ${item.title}`);
-    mark.addEventListener('click', () => { item.done = !item.done; renderPlan(); persist().catch(() => {}); });
+    mark.addEventListener('click', () => { item.done = !item.done; renderPlan(); schedulePersist(); });
     const text = document.createElement('span'); text.textContent = item.title;
     li.append(mark, text); list.append(li);
   }
@@ -581,7 +606,7 @@ function openChat(id) {
   if (!target) return;
   if (workflow) stop();
   chat = target; plan = chat.plan || [];
-  renderChat(); renderPlan(); persist().catch(() => {});
+  renderChat(); renderPlan(); schedulePersist();
   if (plan.some(item => !item.done)) notify('Restored a chat with unfinished steps. Send a message to keep going.');
 }
 function renderHistory() {
@@ -594,7 +619,16 @@ function renderHistory() {
     const meta = document.createElement('span'); meta.className = 'history-time'; meta.textContent = `${new Date(item.at || Date.now()).toLocaleString()} · ${item.messages?.length || 0} messages`;
     button.append(title, meta);
     button.addEventListener('click', () => { $('history-dialog').close(); openChat(item.id); });
-    row.append(button); list.append(row);
+    const drop = document.createElement('button'); drop.type = 'button'; drop.className = 'history-drop';
+    drop.title = 'Delete this chat'; drop.setAttribute('aria-label', `Delete ${item.title || 'chat'}`); setIcon(drop, 'x', 12);
+    drop.addEventListener('click', async () => {
+      if (workflow && chat?.id === item.id) { notify('Stop the run before deleting the chat it is working in.', true); return; }
+      chats = chats.filter(entry => entry.id !== item.id);
+      if (chat?.id === item.id) { chat = null; await newChat(); } else await persist();
+      renderHistory();
+      notify('Chat deleted.');
+    });
+    row.append(button, drop); list.append(row);
   }
 }
 function download(name, text) {
@@ -632,16 +666,19 @@ function exportChat() {
 
 /* ---------- workflow ---------- */
 function stop() {
-  flushTiming(workflow);
+  const running = workflow;
+  rememberSteps(running);
+  flushTiming(running);
   // Every ending funnels through here: report, halt, stop button, step limit. The report path closes
   // the task first, so this only fires for the others.
   const ended = finishTask(workflow, 'stopped');
   workflow = null; proposal = null; currentAction(null);
-  $('approval').hidden = true; $('stop').hidden = true; $('start').hidden = false;
+  if (running) { running.paused = false; running.held = false; running.resume?.(); running.resume = null; }
+  $('approval').hidden = true; $('stop').hidden = true; $('start').hidden = false; $('pause').hidden = true;
   $('goal').disabled = false; $('loading').hidden = true;
   $('run-dot').hidden = true;
   if (ended && chat?.id === ended.chatId) pushMessage('timing', taskLine(ended));
-  renderPlan(); renderSkillChip(); persist().catch(() => {});
+  renderPlan(); renderSkillChip(); schedulePersist();
 }
 function loading(label, icon = 'spinner-gap') {
   // Only the word "Thinking" shimmers: it says the model is still working, and everything after it
@@ -682,7 +719,7 @@ function recordActivity(action, url, result, elapsed, failure, meta = {}) {
   const el = renderMessage(message);
   $('steps').append(el);
   el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-  persist().catch(() => {});
+  schedulePersist();
 }
 // How long the model thought, written once the answer is in. The shimmer is for the wait only.
 function thoughtFor(elapsed) {
@@ -724,9 +761,36 @@ function showProposal(run, action, queued, quiet = false) {
   return proposal;
 }
 
+// A run used to be all-or-nothing: stop threw the goal and the checklist away. A pause freezes it
+// between rounds instead, so a login wall or a 2FA code can be dealt with by hand and the same run
+// carries on afterwards with its plan and evidence intact.
+async function hold(run) {
+  run.held = true;
+  $('loading').hidden = true;
+  currentAction(null);
+  pauseLabel(run);
+  notify('Paused between rounds. Do what you need in the page, then press Continue.');
+  await new Promise(resolve => { run.resume = resolve; });
+  run.held = false; run.resume = null; run.paused = false;
+  pauseLabel(run);
+  if (workflow !== run) return false;
+  loading('Continuing');
+  return true;
+}
+function pauseLabel(run) {
+  const button = $('pause');
+  if (!button) return;
+  const held = !!run?.held, requested = !!run?.paused;
+  setIcon(button, held ? 'arrow-right' : 'hourglass', 16);
+  const text = held ? 'Continue the run' : requested ? 'Pausing after this round — click to cancel' : 'Pause after this round';
+  button.title = text; button.setAttribute('aria-label', text);
+  button.classList.toggle('held', held);
+}
 async function next(run, prefetched) {
   if (workflow !== run) return;
   flushTiming(run);
+  if (run.paused && !(await hold(run))) return;
+  if (workflow !== run) return;
   if (run.steps.length >= STEP_LIMIT) { pushMessage('note', `Stopped at the ${STEP_LIMIT}-action limit. Start a new chat to keep going.`); stop(); return; }
   await listTabs().catch(() => {});
   const acting = tabCache.find(t => t.id === run.actingTabId) || tabCache.find(t => t.active) || tabCache[0];
@@ -820,7 +884,7 @@ async function next(run, prefetched) {
   const elapsed = ms ?? Math.round(performance.now() - started);
   if (workflow !== run) return;
   pushMessage('thought', thoughtFor(elapsed));
-  if (applyCompleted(run, completed)) persist().catch(() => {});
+  if (applyCompleted(run, completed)) schedulePersist();
   if (run.unproven) { pushMessage('note', `${run.unproven} plan step${run.unproven === 1 ? '' : 's'} were claimed done without a verified action, so the tick waits until the work is proven.`); run.unproven = 0; }
   const batch = Array.isArray(actions) && actions.length ? actions : (action ? [action] : []);
   const finish = batch.find(item => item.type === 'done');
@@ -1027,7 +1091,7 @@ async function startWorkflow(goal, skill) {
   const chosen = skill || builtinFor(acting.url, goal);
   const history = chatHistory();
   chat.goal = goal; chat.title = goal.slice(0, 60);
-  workflow = { goal, skill: chosen || null, steps: [], mode, taskStart: Date.now(), chatId: chat.id, spent: null, history, actingTabId: acting.id, homeTabId: acting.id, contextIds: [...contextIds], opened: [], tokens: {}, tokenSeq: 0, stalled: 0, lastHash: '', queue: [], evidence: 0, unproven: 0, recovered: 0, retries: 0, apiRetries: 0, keepGoing: 0, allow: [new URL(acting.url).origin], memory: null, wantShot: false, contextTabs: [], warned: [] };  const run = workflow;
+  workflow = { goal, skill: chosen || null, steps: [], mode, taskStart: Date.now(), chatId: chat.id, spent: null, history, paused: false, held: false, resume: null, actingTabId: acting.id, homeTabId: acting.id, contextIds: [...contextIds], opened: [], tokens: {}, tokenSeq: 0, stalled: 0, lastHash: '', queue: [], evidence: 0, unproven: 0, recovered: 0, retries: 0, apiRetries: 0, keepGoing: 0, allow: [new URL(acting.url).origin], memory: null, wantShot: false, contextTabs: [], warned: [] };  const run = workflow;
   $('run-dot').hidden = false;
   plan = [];
   pushMessage('user', goal);
@@ -1035,7 +1099,7 @@ async function startWorkflow(goal, skill) {
   $('goal').value = ''; grow();
   renderSkillChip();
   $('suggest').hidden = true;
-  $('start').hidden = true; $('stop').hidden = false; $('goal').disabled = true;
+  $('start').hidden = true; $('stop').hidden = false; $('pause').hidden = false; pauseLabel(run); $('goal').disabled = true;
   loading('Reading the page', 'eye');
   try {
     const observed = timed(send('observe', { tabId: acting.id, stayPut }), OBSERVE_TIMEOUT, 'Reading the page took too long — the tab may be stuck or closed.');
@@ -1056,7 +1120,7 @@ async function startWorkflow(goal, skill) {
     else if (planned.status === 'rejected') pushMessage('note', 'No checklist this time — the planner was slow, so I went straight to the page.');
     else pushMessage('note', 'This task is short enough to run without a checklist.');
     renderPlan();
-    persist().catch(() => {});
+    schedulePersist();
     await next(run, shot.value);
   } catch (e) {
     if (workflow !== run) return;
@@ -1111,9 +1175,21 @@ function chatHistory() {
     const text = String(message.text || '').trim();
     if (text) turns.push({ role: message.role === 'user' ? 'user' : 'agent', text });
   }
-  const previous = (chat.steps || []).filter(step => step.ok && step.description).slice(-8);
+  const done = chat.done?.length ? chat.done : (chat.steps || []);
+  const previous = done.filter(step => step.description).slice(-8);
   if (previous.length) turns.push({ role: 'agent', text: `What I already did in this chat: ${previous.map(step => `${step.type}${step.changed === false ? ' (no page change)' : ''}: ${String(step.description).slice(0, 90)}`).join(' | ')}` });
   return turns.slice(-CHAT_TURNS);
+}
+// chat.steps only ever held the latest run, so a chat with three runs remembered the third and forgot
+// the first two. Completed steps accumulate here, capped, and the digest reads from it.
+function rememberSteps(run) {
+  if (!run?.steps?.length || !chat || chat.id !== run.chatId) return;
+  const seen = new Set((chat.done || []).map(step => step.key));
+  const fresh = run.steps
+    .filter(step => step.ok && step.description)
+    .map(step => ({ key: `${step.type}|${step.description}`, type: step.type, description: step.description, changed: step.changed }))
+    .filter(step => !seen.has(step.key));
+  if (fresh.length) chat.done = [...(chat.done || []), ...fresh].slice(-40);
 }
 function renderSkillChip() {
   const chip = $('skill-chip');
@@ -1165,7 +1241,12 @@ async function testConnection() {
     const res = await fetch(baseUrl() + '/health', { signal: AbortSignal.timeout(8000) });
     const out = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(out.error || `Worker answered ${res.status}.`);
-    status.textContent = `Reachable · ${out.model || 'model unknown'} · ${out.provider || 'gemini'}`;
+    if (out.db === false) {
+      status.classList.add('bad');
+      status.textContent = `Reachable · ${out.model || 'model unknown'} — but this Worker has no database binding, so every task answers 503. Add a D1 binding named DB.`;
+      return;
+    }
+    status.textContent = `Reachable · ${out.model || 'model unknown'} · ${out.provider || 'gemini'}${out.db ? ' · db ok' : ''}`;
   } catch (e) {
     status.classList.add('bad');
     status.textContent = `Not reachable: ${e.message}`;
@@ -1232,12 +1313,21 @@ $('settings-close').addEventListener('click', event => { event.preventDefault();
 $('settings-dialog').addEventListener('click', event => { if (event.target === $('settings-dialog')) $('settings-dialog').close(); });
 $('history-dialog').addEventListener('click', event => { if (event.target === $('history-dialog')) $('history-dialog').close(); });
 $('saw-dialog').addEventListener('click', event => { if (event.target === $('saw-dialog')) $('saw-dialog').close(); });
-$('plan-clear').addEventListener('click', () => { if (workflow) return; plan = []; renderPlan(); persist().catch(() => {}); });
+$('plan-clear').addEventListener('click', () => { if (workflow) return; plan = []; renderPlan(); schedulePersist(); });
 task('approve', async () => { const run = workflow; if (!run) throw new Error('Start a task first.'); if (!run.queue?.length) throw new Error('Nothing queued — send a message to continue.'); if (run.queue[0]?.type === 'navigate') await permission(run.queue[0].url); if (workflow !== run) return; $('approval').hidden = true; await runBatch(run); });
 $('tabs-refresh').addEventListener('click', async () => { try { await listTabs(); } catch (e) { notify(e.message || 'Could not list tabs.', true); } });
 $('tabs-current').addEventListener('click', async () => { try { const [tab] = await chrome.tabs.query({ active: true, currentWindow: true }); if (!tab?.id) throw new Error('Select a webpage first.'); actingTabId = tab.id; contextIds = contextIds.filter(id => id !== tab.id); renderTabs(); await permission(tab.url); } catch (e) { notify(e.message || 'Something went wrong.', true); } });
 $('reject').addEventListener('click', () => { stop(); notify('Stopped without taking the proposed action.'); });
 $('stop').addEventListener('click', () => { stop(); notify('Workflow stopped. An action already in progress may still finish.'); });
+$('pause').addEventListener('click', () => {
+  const run = workflow;
+  if (!run) return;
+  if (run.held) { run.resume?.(); notify('Continuing.'); return; }
+  if (run.paused) { run.paused = false; pauseLabel(run); notify('Pause cancelled — carrying on.'); return; }
+  run.paused = true; pauseLabel(run); notify('Pausing after this round — the page is yours until you press Continue.');
+});
+// A closed panel or a tab switch used to lose the last few messages, so flush before it goes away.
+document.addEventListener('visibilitychange', () => { if (document.hidden && chat) persist().catch(() => {}); });
 $('worker').addEventListener('change', async () => { await chrome.storage.local.set({ worker: $('worker').value.trim().replace(/\/$/, '') }); });
 $('bridge-toggle').addEventListener('change', async () => { try { const out = await send('bridge', { on: $('bridge-toggle').checked }); notify(out.connected ? 'Bridge on. Start node bridge/server.mjs to accept MCP clients.' : 'Bridge off.'); } catch (e) { notify(e.message || 'Could not toggle the bridge.', true); } });
 $('pointer-toggle').addEventListener('change', async () => { await chrome.storage.local.set({ pointer: $('pointer-toggle').checked }); notify($('pointer-toggle').checked ? 'Pointer on: a purple cursor shows where the agent clicks.' : 'Pointer off.'); });

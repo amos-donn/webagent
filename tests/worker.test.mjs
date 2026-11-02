@@ -721,3 +721,14 @@ test('chat history is capped at ten turns, clipped, and junk cannot break a run'
     assert.doesNotMatch(said(junk.calls[0]), /EARLIER IN THIS CHAT/);
   } finally { junk.restore(); }
 });
+
+test('/health says whether the database binding is present', async () => {
+  const health = env => worker.fetch(new Request('https://worker.test/health'), env);
+  const ok = await (await health({ DB:db, GEMINI_API_KEY:'test-key' })).json();
+  assert.equal(ok.ok, true);
+  assert.equal(ok.db, true, 'a bound DB is reported');
+  assert.ok(ok.model, 'and the model that will answer');
+  const bare = await (await health({ GEMINI_API_KEY:'test-key' })).json();
+  assert.equal(bare.ok, true, 'health does not need the binding to answer');
+  assert.equal(bare.db, false, 'but it says when it is missing');
+});

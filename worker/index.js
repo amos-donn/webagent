@@ -465,7 +465,9 @@ export default {
   async fetch(request, env) {
     if (request.method === 'OPTIONS') return json({ ok: true });
     const path = new URL(request.url).pathname;
-    if (path === '/health' && request.method === 'GET') return json({ ok: true, provider: 'gemini', model: modelName(env), speed: DEFAULT_SPEED });
+    // A URL and a key can be right while the binding that every rate limit needs is missing, and that
+    // only ever showed up as a 503 on a real task. Say it in the one request the panel already makes.
+    if (path === '/health' && request.method === 'GET') return json({ ok: true, provider: 'gemini', model: modelName(env), speed: DEFAULT_SPEED, db: !!env.DB });
     if (!env.DB) return json({ error: 'Server is missing the DB binding.' }, 503);
     const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
     const started = Date.now();

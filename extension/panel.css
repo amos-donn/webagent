@@ -320,6 +320,8 @@ details.tabs[open] > summary::after { transform:rotate(-135deg) }
 .send:disabled { opacity:.4; cursor:not-allowed }
 .send .ph { width:16px; height:16px }
 .send.stop { background:var(--bad); color:#fff }
+.send.pause { background:var(--surface-3); color:var(--ink-2); border:1px solid var(--line); box-shadow:var(--tap) }
+.send.pause.held { background:var(--accent); color:#fff; border-color:transparent }
 .footnote { margin:8px 6px 0; text-align:center; font-size:10.5px; line-height:1.5; color:var(--faint) }
 
 .tab-strip { display:flex; align-items:center; gap:5px; overflow-x:auto; padding:0 2px 7px; scrollbar-width:none }
@@ -387,12 +389,14 @@ dialog[open] { animation:pop .18s ease both }
 .auth label.auto input { width:14px; height:14px; margin:0; accent-color:var(--accent) }
 .auth .hint { padding:0; margin-top:14px }
 .history-list { display:flex; flex-direction:column; gap:4px; margin-top:10px; max-height:280px; overflow-y:auto }
-.history-row { border:1px solid var(--line); border-radius:9px; overflow:hidden; background:var(--surface-2) }
+.history-row { display:flex; align-items:stretch; border:1px solid var(--line); border-radius:9px; overflow:hidden; background:var(--surface-2) }
 .history-row.current { border-color:var(--accent-line); background:var(--accent-soft) }
-.history-open { display:flex; flex-direction:column; align-items:flex-start; gap:2px; width:100%; text-align:left; padding:8px 10px; color:var(--ink-2) }
+.history-open { display:flex; flex:1; min-width:0; flex-direction:column; align-items:flex-start; gap:2px; width:100%; text-align:left; padding:8px 10px; color:var(--ink-2) }
 .history-open:hover { background:var(--surface-3) }
 .history-open strong { font-size:12px; max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
 .history-time { font-size:10.5px; color:var(--faint); font-variant-numeric:tabular-nums }
+.history-drop { display:grid; place-items:center; width:30px; flex:none; color:var(--faint); border-left:1px solid var(--line); transition:color .12s ease, background .12s ease }
+.history-drop:hover { color:var(--bad); background:var(--surface-3) }
 
 .ph { display:block; flex:none }
 .ph path, svg.ph { pointer-events:none }

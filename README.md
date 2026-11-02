@@ -98,7 +98,13 @@ The topbar badge is the current chat's title, not a fixed product label — clic
 
 Settings covers the worker URL with a **Test connection** button that asks `GET /health` and names the model actually answering, the speed preset, whether to wait for slow pages, whether to stay on your tab, a **Checklist** control for the plan mode that used to be reachable only through `/plan`, `/noplan` and `/auto-plan`, and the list of saved skills with a delete button (they used to be write-only).
 
-A second message in the same chat is a continuation, not a fresh start: the panel sends the last ten turns plus a digest of the previous run's steps to both `/plan` and `/agent`, and the Worker clips them into an `EARLIER IN THIS CHAT` block above the current goal. So "do the same for the second one" has a referent, and the model does not repeat what it already finished. The current goal still outranks the history; the history is context, never a new instruction.
+A second message in the same chat is a continuation, not a fresh start: the panel sends the last ten turns plus a digest of everything already completed in the chat (up to forty steps, accumulated across runs, not just the last one) to both `/plan` and `/agent`, and the Worker clips them into an `EARLIER IN THIS CHAT` block above the current goal. So "do the same for the second one" has a referent, and the model does not repeat what it already finished. The current goal still outranks the history; the history is context, never a new instruction.
+
+A run can be paused between rounds rather than only stopped. The pause button in the composer freezes the run with its checklist and evidence intact, so a login wall or a 2FA code can be handled by hand, and Continue resumes the same run instead of starting a new one.
+
+Chats are capped at twenty and the oldest is dropped only with a visible warning — each row in the chat list also has its own delete button — and a storage write that fails now says so instead of leaving the chat silently unsaved. The chat list's delete button refuses while a run is working in that chat.
+
+The **Test connection** button reports three things separately: whether the Worker answers at all, which model will answer, and whether its D1 binding is present. A Worker with a right URL and key but no `DB` binding would otherwise only fail on the first real task, with a 503.
 
 ## What a round costs
 
