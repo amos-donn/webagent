@@ -34,7 +34,7 @@ The message box understands two shortcuts: `/` opens commands (`/new`, `/chats`,
 
 A checklist is optional: the planner returns no steps for short tasks, so a one-click job runs without one. Use `/plan` to force a checklist for every task or `/noplan` to skip it.
 
-The message box is one tall field with the mode picker and the send button inside it, and nothing else stacked underneath. While a task runs, the send button is replaced by a large stop control in the same corner. There is no Continue button: the agent carries on to the next step by itself, and only a dead end stops the run and drops the task back into the box to resend. All panel icons are [Phosphor](https://phosphoricons.com) geometry vendored in `extension/icons.js`, so nothing is fetched from the network.
+The message box is one tall field with the send button inside it, and nothing else stacked underneath. While a task runs, the send button is replaced by a large stop control in the same corner. There is no Continue button: the agent carries on to the next step by itself, and only a dead end stops the run and drops the task back into the box to resend. All panel icons are [Phosphor](https://phosphoricons.com) geometry vendored in `extension/icons.js`, so nothing is fetched from the network.
 
 ## Action standards
 
@@ -54,7 +54,7 @@ When the model says the task is done, the run does not end there. The panel re-r
 
 If the check finds missing work that a browser action could still fix, that verdict is fed back as a correction and the agent goes back to the page, up to two extra rounds. When it finishes either way, the chat ends with a report card: the verdict, two or three sentences on what happened, then *What I did*, *What failed* and *Could not do* lists. A check that cannot run (rate limit, offline) is reported as unverified rather than pretending to pass, and unchecked plan items are listed under *Could not do*. The report is part of the chat, so it survives reloads and is included in `Export .md`.
 
-The mode picker mirrors the three modes Claude in Chrome offers: **Ask each round** pauses for approval, **Auto** runs freely but pauses before steps that look irreversible (paying, deleting, sending, submitting, sharing, uploading, or typing password/card-like text), and **Autopilot** never pauses. No tab group is created: the star just marks the tab the agent acts in, and the eye button shows the exact screenshot the last decision was made from.
+There is no approval-mode picker any more: every round's actions run, and a step that looks irreversible (paying, deleting, sending, submitting, sharing, uploading, or typing password/card-like text) is still matched against the goal and announced in the timeline instead of going ahead silently. No tab group is created: the star just marks the tab the agent acts in, and the eye button shows the exact screenshot the last decision was made from.
 
 ## Accessibility refs, safety boundary, skills, evals and the MCP bridge
 
@@ -68,7 +68,9 @@ The mode picker mirrors the three modes Claude in Chrome offers: **Ask each roun
 
 **Keyboard.** Keys are sent as real key events, so the agent can use what a person would: `/` or `s` to focus a site's search, `Escape` to close a dialog, `Tab`/`Shift+Tab`, `Space`/`Shift+Space`, `Home`/`End`, `PageUp`/`PageDown`, arrow keys, plus any printable character and chords like `Control+K`, `Shift+Tab` or `Meta+Enter`. When a nested scroller ignores programmatic scrolling, `scroll` falls back to the Space bar.
 
-**Typed errors.** Failures return codes (`STALE_REF`, `NOT_ACTIONABLE`, `BLOCKED_ACTION`, `PAGE_CHANGED`, `NO_EFFECT`, `PASSWORD_FIELD`) which appear in the timeline and in the model's history. In Auto and Autopilot a failed step is feedback, not an ending: the run re-reads the page and tries another route (up to three consecutive retries) instead of handing control back after one obstacle.
+**Typed errors.** Failures return codes (`STALE_REF`, `NOT_ACTIONABLE`, `BLOCKED_ACTION`, `PAGE_CHANGED`, `NO_EFFECT`, `PASSWORD_FIELD`) which appear in the timeline and in the model's history. A failed step is feedback, not an ending: the run re-reads the page and tries another route (up to three consecutive retries) instead of handing control back after one obstacle.
+
+**Rate limits.** When Gemini answers with a usage limit — a per-minute call cap, not a bad key — the run does not end. The loading card counts down thirty seconds (*Usage limit — restarting in 26s*) and the same round is retried by itself, up to six times in a row before the limit is reported as a stop. The wait does not consume the ordinary retries, and a rate-limited `write` or click waits the same way before it looks at the page again.
 
 **Skills.** `/skill` distils the current run into a named, parameterised skill (secrets listed as parameters, values never stored) and `/` lists saved skills to replay. One skill ships built in: **Summarize with Gemini**. On a Google page — Docs, Drive, Sheets, Slides, Gmail or Search — a purple pill appears inside the message box, and typing anything with *summarize*, *tl;dr*, *key points* or *recap* in it attaches the skill automatically, so "summarize this" needs no setup. The skill tells the agent to read the page, answer with its `done` summary and leave the document untouched; the result lands in the chat report.
 

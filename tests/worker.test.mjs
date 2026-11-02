@@ -518,3 +518,13 @@ test('a click that keeps failing is corrected with the count, not silently repea
     assert.doesNotMatch(said(mock.calls[0]), /PROVEN DONE THIS RUN/);
   } finally { mock.restore(); }
 });
+
+test('a Gemini rate limit comes back as 429 so the panel can wait it out', async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({ error:{ message:'Resource has been exhausted (e.g. check quota).' } }), { status:429, headers:{ 'Content-Type':'application/json' } });
+  try {
+    const response = await worker.fetch(request(observation), { DB:db, GEMINI_API_KEY:'test-key' });
+    assert.equal(response.status, 429, 'a limit is not a rejected request');
+    assert.match((await response.json()).error, /Gemini request failed \(429\)/);
+  } finally { globalThis.fetch = original; }
+});

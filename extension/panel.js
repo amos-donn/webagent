@@ -8,6 +8,8 @@ const RISK = /\b(buy now|place order|pay now|purchase|checkout|transfer|withdraw
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 let workflow = null, proposal = null, plan = [], chats = [], chat = null;
 let tabCache = [], actingTabId = null, contextIds = [];
+// There is no mode picker any more: every round runs on its own, and a risky-looking step is still
+// matched against the goal and announced in the timeline.
 let mode = 'autopilot', planMode = 'auto', lastShot = '', skills = [];
 
 function notify(text, error = false) { $('notice').textContent = text; $('notice').classList.toggle('error', error); $('notice').hidden = false; }
@@ -23,6 +25,22 @@ async function permission() {
 }
 async function activeUrl() { const [tab] = await chrome.tabs.query({ active: true, currentWindow: true }); if (!tab?.url) throw new Error('Select a webpage first.'); return tab.url; }
 async function send(type, data = {}) { const out = await chrome.runtime.sendMessage({ type, ...data }); if (out.error) throw Object.assign(new Error(out.error), { code: out.code || 'ERROR' }); return out.data; }
+// A per-minute cap is a pause, not a failure: count it down and pick the run back up by itself.
+const COOLDOWN_SECONDS = 30;
+const COOLDOWN_LIMIT = 6;
+const RATE_LIMIT = /(rate limit|rate-limit|quota|too many requests|resource.?exhausted)/i;
+let cooldowns = 0;
+const isRateLimit = (status, message) => Number(status) === 429 || RATE_LIMIT.test(String(message || ''));
+async function cooldown(seconds = COOLDOWN_SECONDS) {
+  const end = Date.now() + seconds * 1000;
+  cooldowns += 1;
+  notify(`The model hit its usage limit. Restarting in ${seconds}s.`);
+  while (Date.now() < end) {
+    const left = Math.max(1, Math.ceil((end - Date.now()) / 1000));
+    loading(`Usage limit — restarting in ${left}s`, 'hourglass');
+    await sleep(200);
+  }
+}
 async function api(path, data, retries = 2) {
   const base = baseUrl();
   let lastError = new Error('Request failed.');
@@ -30,12 +48,19 @@ async function api(path, data, retries = 2) {
     try {
       const res = await fetch(base + path, { method: 'POST', headers: { 'Content-Type':'application/json' }, body: JSON.stringify(data) });
       const out = await res.json().catch(() => ({}));
-      if (res.ok) return out;
+      if (res.ok) { cooldowns = 0; return out; }
       const error = new Error(out.error || `Request failed (${res.status}).`);
+      if (isRateLimit(res.status, error.message)) {
+        // Waiting does not spend a retry, and the cap keeps a hard outage from hanging forever.
+        if (cooldowns < COOLDOWN_LIMIT) { await cooldown(); attempt -= 1; continue; }
+        error.code = 'RATE_LIMIT';
+        throw error;
+      }
       if (res.status < 500 && res.status !== 429) throw error;
       lastError = error;
     } catch (e) {
       lastError = e;
+      if (e.code === 'RATE_LIMIT') throw e;
       if (/failed \(4/.test(e.message) || /limit reached/i.test(e.message)) throw e;
     }
     if (attempt < retries) await sleep(400 * (attempt + 1));
@@ -299,7 +324,7 @@ function exportChat() {
 function stop() {
   workflow = null; proposal = null; currentAction(null);
   $('approval').hidden = true; $('stop').hidden = true; $('start').hidden = false;
-  $('goal').disabled = false; $('mode').disabled = false; $('loading').hidden = true;
+  $('goal').disabled = false; $('loading').hidden = true;
   renderPlan(); renderSkillChip(); persist().catch(() => {});
 }
 function loading(label, icon = 'spinner-gap') {
@@ -519,6 +544,8 @@ async function executeOne(run, current) {
   }
   catch (error) {
     if (workflow !== run) return 'stop';
+    // A rate-limited write or click is also just a pause: wait out the window, then look again.
+    if (isRateLimit(error.status, error.message) && cooldowns < COOLDOWN_LIMIT) { await cooldown(); return 'recover'; }
     if (error.code === 'PAGE_CHANGED' && (run.recovered || 0) < 2) { run.recovered = (run.recovered || 0) + 1; notify('The page shifted while acting. Re-reading it and trying again.'); return 'recover'; }
     run.steps.push({ type: action.type, description: action.description || '', ok: false, changed: false, code: error.code || 'ERROR', note: error.message, page: current.url, ref: action.ref, x: current.action.x, y: current.action.y, url: action.url, direction: action.direction, text: action.type === 'type' ? action.text : undefined });
     recordActivity(action, current.url, {}, 0, `${error.message}${error.code ? ` [${error.code}]` : ''}`);
@@ -563,7 +590,7 @@ async function startWorkflow(goal, skill) {
   $('goal').value = ''; grow();
   renderSkillChip();
   $('suggest').hidden = true;
-  $('start').hidden = true; $('stop').hidden = false; $('goal').disabled = true; $('mode').disabled = true;
+  $('start').hidden = true; $('stop').hidden = false; $('goal').disabled = true;
   loading('Reading the page', 'eye');
   try {
     const observed = send('observe', { tabId: acting.id, activate: true });
@@ -681,7 +708,6 @@ $('composer').addEventListener('submit', async event => {
 $('goal').addEventListener('keydown', event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); $('composer').requestSubmit(); } });
 $('goal').addEventListener('input', () => { grow(); renderSuggest(); });
 $('goal').addEventListener('blur', () => setTimeout(hideSuggest, 150));
-$('mode').addEventListener('change', () => { mode = $('mode').value; chrome.storage.local.set({ mode }); notify(mode === 'autopilot' ? 'Autopilot: actions run without asking.' : mode === 'auto' ? 'Auto: runs freely but pauses before risky steps.' : 'Approve each round before it runs.'); });
 $('new-chat').addEventListener('click', () => { newChat().catch(e => notify(e.message || 'Could not start a chat.', true)); });
 $('history-btn').addEventListener('click', openHistory);
 $('history-close').addEventListener('click', event => { event.preventDefault(); $('history-dialog').close(); });
@@ -713,14 +739,12 @@ $('pointer-toggle').addEventListener('change', async () => { await chrome.storag
 chrome.runtime.onMessage.addListener(message => { if (message && message.type === 'pointerBlocked') notify('Pointer is on, but this page blocks the cursor overlay — the click still went ahead.', true); });
 
 (async () => {
-  const saved = await chrome.storage.local.get(['worker', 'chats', 'activeChat', 'mode', 'planMode', 'lastShot', 'skills', 'bridge', 'pointer']);
+  const saved = await chrome.storage.local.get(['worker', 'chats', 'activeChat', 'planMode', 'lastShot', 'skills', 'bridge', 'pointer']);
   $('worker').value = saved.worker || 'https://webagent.amos-donn.workers.dev';
   skills = Array.isArray(saved.skills) ? saved.skills : [];
   $('bridge-toggle').checked = saved.bridge === true;
   $('pointer-toggle').checked = saved.pointer !== false;
-  mode = ['manual', 'auto', 'autopilot'].includes(saved.mode) ? saved.mode : 'autopilot';
   planMode = ['auto', 'always', 'never'].includes(saved.planMode) ? saved.planMode : 'auto';
-  $('mode').value = mode;
   lastShot = saved.lastShot || '';
   $('saw-btn').hidden = !lastShot;
   chats = Array.isArray(saved.chats) ? saved.chats : [];

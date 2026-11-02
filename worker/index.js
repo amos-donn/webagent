@@ -378,6 +378,8 @@ async function gemini(env, { prompt, image, maxTokens }) {
         const detail = clip(data?.error?.message, 200);
         const error = new Error(`Gemini request failed (${response.status}) for ${model}${detail ? `: ${detail}` : ''}. Check GEMINI_API_KEY, model access and rate limits.`);
         error.retry = response.status === 429 || response.status >= 500;
+        // Carried through so the panel can tell a rate limit (wait and retry) from a real rejection.
+        error.status = response.status;
         throw error;
       }
       const candidate = data?.candidates?.[0];
@@ -600,6 +602,6 @@ export default {
         return json({ actions, action: actions[0], completed, incomplete, memory: nextMemory, retried, injection: spot.removed.length, ms: totalMs || Date.now() - started, model });
       }
       return json({ error: 'Not found.' }, 404);
-    } catch (error) { console.error('Request failed:', error.message); return json({ error: error.message || 'Request failed.' }, 400); }
+    } catch (error) { console.error('Request failed:', error.message); return json({ error: error.message || 'Request failed.' }, error.status === 429 ? 429 : 400); }
   }
 };
