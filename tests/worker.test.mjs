@@ -460,3 +460,51 @@ test('a correction from the final check is carried into the next round', async (
     assert.match(said(mock.calls[0]), /CORRECTION: The title is still empty: type it into the document\./);
   } finally { mock.restore(); }
 });
+
+test('tab actions open a tab, and the prompt lists the tabs by id', async () => {
+  const mock = scripted([{ actions:[{ type:'open', query:'standing desk prices', description:'Research prices in a new tab' }] }]);
+  try {
+    const response = await worker.fetch(request({ ...observation, tabs:[
+      { id:'t1', title:'Docs', url:'https://docs.example.com/', acting:true },
+      { id:'t2', title:'Prices', url:'https://shop.example.com/', opened:true }
+    ] }), { DB:db, GEMINI_API_KEY:'test-key' });
+    assert.equal(response.status, 200);
+    const out = await response.json();
+    assert.equal(out.action.type, 'open');
+    assert.match(out.action.url, /^https:\/\/duckduckgo\.com\/\?q=standing(\+|%20)desk(\+|%20)prices/);
+    const prompt = said(mock.calls[0]);
+    assert.match(prompt, /TABS \(the user’s tabs and yours; use these ids for focus, gather and close\):/);
+    assert.match(prompt, /t1 \(acting\) — Docs — https:\/\/docs\.example\.com\//);
+    assert.match(prompt, /t2 \(opened by you\) — Prices/);
+    assert.match(prompt, /- open: \{"type":"open","url":"https:\/\/\.\.\."/);
+    assert.match(prompt, /- gather: \{"type":"gather","tabs":\["t2","t3"\]/);
+    assert.match(prompt, /Three new tabs is the ceiling/);
+  } finally { mock.restore(); }
+});
+
+test('focus, gather and close are validated against the tab list', async () => {
+  const gather = scripted([{ actions:[{ type:'gather', tabs:['t2','t2','t1'], description:'Read both tabs' }] }]);
+  try {
+    const response = await worker.fetch(request({ ...observation, tabs:[{ id:'t1', title:'Docs', url:'https://docs.example.com/', acting:true }] }), { DB:db, GEMINI_API_KEY:'test-key' });
+    const out = await response.json();
+    assert.equal(response.status, 200);
+    assert.equal(out.action.type, 'gather');
+    assert.deepEqual(out.action.tabs, ['t2','t1']);
+  } finally { gather.restore(); }
+  const bad = scripted([{ actions:[{ type:'focus', tab:'z9', description:'Go back' }] }, { actions:[{ type:'focus', tab:'z9', description:'Go back' }] }]);
+  try {
+    const response = await worker.fetch(request({ ...observation }), { DB:db, GEMINI_API_KEY:'test-key' });
+    assert.equal(response.status, 400);
+    assert.match((await response.json()).error, /not in the TABS list/);
+    assert.match(said(bad.calls[1]), /CORRECTION: That tab is not in the TABS list/);
+  } finally { bad.restore(); }
+});
+
+test('a tab action cannot be batched with a click', async () => {
+  const mock = scripted([{ actions:[{ type:'open', url:'https://example.com/', description:'New tab' }, click()] }]);
+  try {
+    const response = await worker.fetch(request({ ...observation }), { DB:db, GEMINI_API_KEY:'test-key' });
+    assert.equal(response.status, 400);
+    assert.match((await response.json()).error, /cannot be batched/);
+  } finally { mock.restore(); }
+});

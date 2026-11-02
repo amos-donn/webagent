@@ -36,6 +36,17 @@ A checklist is optional: the planner returns no steps for short tasks, so a one-
 
 The message box is one tall field with the mode picker and the send button inside it, and nothing else stacked underneath. While a task runs, the send button is replaced by a large stop control in the same corner. There is no Continue button: the agent carries on to the next step by itself, and only a dead end stops the run and drops the task back into the box to resend. All panel icons are [Phosphor](https://phosphoricons.com) geometry vendored in `extension/icons.js`, so nothing is fetched from the network.
 
+## Many tabs, one task
+
+The agent drives one tab at a time, and it can move between them. Every open tab is listed to the model with a short id (`t1`, `t2`) and a marker for whether it is the acting tab, a read-only context tab, or a tab this run opened. Four actions use that list:
+
+- **open** — `{"type":"open","url":"https://…"}` or `{"query":"standing desk prices"}` opens a new tab, activates it, adds it to the `webagent` tab group and acts there from the next round. It is how the agent researches a second site, reads a source, or visits a page the task needs next without navigating away from the page it is working in.
+- **focus** — switches the acting tab back to one from the list, so research in a new tab, then acting back in the original document, is one run rather than two chats.
+- **gather** — reads one to five tabs in a single call and returns their text as the step result; the model then compares, cites or fills from all of them without switching per tab.
+- **close** — closes a tab, and only one the run itself opened. The user's own tabs are never closed, and three new tabs is the ceiling for one task.
+
+Tab ids stay stable for the whole run, so `t3` in round eight still means the tab it meant in round one. The tab strip above the message box shows the acting tab and the context tabs as pills; clicking a pill opens the full tab list, and the `×` on a context pill drops it. The tab list marks tabs the run opened with an `agent` badge.
+
 ## Action standards
 
 The prompt now spells out how to act, not just what to do. Every action follows a ladder — click by accessibility ref, then by coordinates, then keyboard focus plus Enter/Space, then the site's own shortcut or the URL — and the model is told to move down a rung rather than repeat a call. Each typed error has a prescribed next move (`STALE_REF` → re-read the page, `NOT_ACTIONABLE` → scroll or reveal it or use the keyboard, `NO_EFFECT` → dismiss the overlay or use the label's parent, `PAGE_CHANGED` → observe again, `BLOCKED_ACTION` → report and work elsewhere), and two failures on one control force a change of route. Scrolling covers nested and keyboard-driven containers and when to stop; typing covers one value vs several fields vs a rich editor, when to set `submit`, and what to do when a field ignores an insert. The rules duplicate the element map, the error codes and the goal instructions on purpose — they are what the model reads at the decision point.

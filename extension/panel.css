@@ -49,6 +49,21 @@ button.plan-mark:hover { opacity: .75; }
 .send.stop:hover:not(:disabled){background:#182420}
 .send.stop .ph{width:26px;height:26px}
 .footnote{margin:7px 4px 0;text-align:center}
+
+/* Tabs you can see: what the agent acts in, what it reads, and a way in to the full list. */
+.tab-strip{display:flex;align-items:center;gap:5px;overflow-x:auto;padding:0 2px 7px;scrollbar-width:none}
+.tab-strip::-webkit-scrollbar{display:none}
+.tab-pill{display:inline-flex;align-items:center;gap:5px;flex:none;max-width:190px;background:#fff;border:1px solid #e1e9dd;border-radius:999px;color:#4e6554;font:inherit;font-size:11px;font-weight:700;padding:5px 9px;cursor:pointer;line-height:1.15;transition:background .14s ease,border-color .14s ease}
+.tab-pill>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:140px}
+.tab-pill .ph{color:#7d9a78;flex:none}
+.tab-pill:hover{background:#f1f5ed;border-color:#cfe0c7}
+.tab-pill.acting{background:#eef4e9;border-color:#cfe0c7;color:#2c5948}
+.tab-pill.acting .ph{color:#2c5948}
+.tab-pill.context{background:#fbfdf8;border-style:dashed;cursor:default}
+.tab-pill.add{background:transparent;border-style:dashed;color:#74876f;font-weight:600}
+.tab-drop{display:grid;place-items:center;background:none;border:0;padding:0;margin-left:1px;color:#a3b0a2;cursor:pointer;border-radius:50%}
+.tab-drop:hover{color:#96443a}
+.tab-tag.agent{background:#eef4e9;color:#3b5a45}
 .message.current{display:flex;align-items:center;gap:6px;color:#4e6554}
 
 /* The report the run ends on: verdict, what happened, what did not. */

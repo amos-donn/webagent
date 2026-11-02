@@ -1,6 +1,7 @@
 const $ = id => document.getElementById(id);
 const ICONS = { think:'sparkle', click:'cursor-click', type:'keyboard', write:'sparkle', read:'book-open-text', scroll:'arrows-down-up', wait:'hourglass', navigate:'arrow-right', key:'key-return' };
-const LABELS = { think:'Thinking through', click:'Clicking', type:'Typing', write:'Writing with Gemini', read:'Reading page', scroll:'Scrolling', wait:'Waiting', navigate:'Navigating', key:'Pressing key' };
+const LABELS = { think:'Thinking through', click:'Clicking', type:'Typing', write:'Writing with Gemini', read:'Reading page', scroll:'Scrolling', wait:'Waiting', navigate:'Navigating', key:'Pressing key', open:'Opening a new tab', focus:'Switching tabs', gather:'Reading tabs', close:'Closing a tab' };
+const TAB_STEPS = new Set(['open', 'focus', 'gather', 'close']);
 const STEP_LIMIT = 60;
 const MAX_CHATS = 20;
 const MAX_MESSAGES = 400;
@@ -135,11 +136,51 @@ function renderTabs() {
     ctx.addEventListener('click', async () => { if (t.id === actingTabId) return; contextIds = contextIds.includes(t.id) ? contextIds.filter(id => id !== t.id) : [...contextIds, t.id].slice(0, 5); renderTabs(); if (contextIds.includes(t.id)) { try { await permission(t.url); } catch (e) { notify(e.message || 'Site access was not granted.', true); } } });
     const label = document.createElement('span'); label.className = 'tab-label'; label.textContent = shortTitle(t); label.title = t.url;
     if (!t.supported) { const tag = document.createElement('span'); tag.className = 'tab-tag'; tag.textContent = 'unsupported'; label.append(' ', tag); }
+    else if (workflow?.opened?.includes(t.id)) { const tag = document.createElement('span'); tag.className = 'tab-tag agent'; tag.textContent = 'agent'; label.append(' ', tag); }
     row.append(act, ctx, label); box.append(row);
   }
   const acting = tabCache.find(t => t.id === actingTabId);
   $('tabs-label').textContent = acting ? `★ ${shortTitle(acting)}${contextIds.length ? ` · +${contextIds.length} context` : ''}` : 'No tab selected';
-  renderSkillChip();
+  renderSkillChip(); renderTabStrip();
+}
+function tabPill(text, icon, className, title) {
+  const pill = document.createElement('button');
+  pill.type = 'button'; pill.className = `tab-pill ${className}`.trim(); pill.title = title;
+  pill.append(phosphor(icon, 11), document.createElement('span'));
+  pill.lastChild.textContent = text;
+  return pill;
+}
+// The strip above the box: what the agent acts in, what it can read, and a way into the full list.
+function renderTabStrip() {
+  const strip = $('tab-strip');
+  if (!strip) return;
+  const acting = tabCache.find(t => t.id === actingTabId);
+  strip.textContent = '';
+  if (!acting) { strip.hidden = true; return; }
+  const current = tabPill(shortTitle(acting), 'star', 'acting', `${acting.url} — the tab the agent acts in`);
+  current.addEventListener('click', toggleTabsBox);
+  strip.append(current);
+  for (const id of contextIds) {
+    const tab = tabCache.find(t => t.id === id);
+    if (!tab) continue;
+    const pill = document.createElement('span');
+    pill.className = 'tab-pill context'; pill.title = `${tab.url} — read-only context`;
+    pill.append(phosphor('plus', 11));
+    const label = document.createElement('span'); label.textContent = shortTitle(tab); pill.append(label);
+    const drop = document.createElement('button'); drop.type = 'button'; drop.className = 'tab-drop'; drop.title = 'Stop using this tab as context'; drop.setAttribute('aria-label', `Remove ${shortTitle(tab)} from context`); setIcon(drop, 'x', 9);
+    drop.addEventListener('click', () => { contextIds = contextIds.filter(item => item !== id); renderTabs(); });
+    pill.append(drop);
+    strip.append(pill);
+  }
+  const add = tabPill(contextIds.length ? 'Tabs' : 'Add a tab', 'chats-circle', 'add', 'Choose which tab the agent acts in, and which it can read');
+  add.addEventListener('click', toggleTabsBox);
+  strip.append(add);
+  strip.hidden = false;
+}
+function toggleTabsBox() {
+  const box = $('tabs-box');
+  box.open = !box.open;
+  if (box.open) box.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
 
 /* ---------- chats ---------- */
@@ -392,13 +433,14 @@ async function next(run, prefetched) {
   const scale = image.naturalWidth / shot.width;
   const elements = (shot.elements || []).map(el => ({ role: el.role, name: el.name, x: Math.round(el.x * scale), y: Math.round(el.y * scale), off: el.off, state: el.state }));
   const refs = Array.isArray(shot.refs) ? shot.refs : [];
+  const tabs = tabList(run).filter(({ tab }) => tab.supported).map(({ token, tab }) => ({ id: token, title: shortTitle(tab), url: tab.url, acting: tab.id === acting.id, context: run.contextIds.includes(tab.id), opened: (run.opened || []).includes(tab.id) }));
   run.view = { tabId: shot.tabId, url: shot.url, width: shot.width, height: shot.height, naturalWidth: image.naturalWidth, naturalHeight: image.naturalHeight };
   const done = plan.filter(item => item.done).length;
   loading(plan.length ? `Thinking · ${done}/${plan.length} plan steps · action ${run.steps.length + 1}/${STEP_LIMIT}` : `Thinking about action ${run.steps.length + 1}`, 'sparkle');
   // Vision is a fallback: it is only attached for thin trees or when the model asks for it.
   const sendImage = run.wantShot || refs.length < 15;
   const started = performance.now();
-  const { actions, action, completed, incomplete, memory, needScreenshot, ms } = await api('/agent', { goal:aimed(run), intent:[run.goal, ...plan.map(item => item.title)].join('\n'), todos:plan, steps:run.steps, url:shot.url, title:shot.title, text:shot.text, ...(sendImage ? { image: shot.image } : {}), width:image.naturalWidth, height:image.naturalHeight, elements, refs, memory: run.memory || undefined, stalled:run.stalled, automatic:run.mode === 'autopilot', correction: run.correction || undefined, contexts:extra });
+  const { actions, action, completed, incomplete, memory, needScreenshot, ms } = await api('/agent', { goal:aimed(run), intent:[run.goal, ...plan.map(item => item.title)].join('\n'), todos:plan, steps:run.steps, url:shot.url, title:shot.title, text:shot.text, ...(sendImage ? { image: shot.image } : {}), width:image.naturalWidth, height:image.naturalHeight, elements, refs, tabs, memory: run.memory || undefined, stalled:run.stalled, automatic:run.mode === 'autopilot', correction: run.correction || undefined, contexts:extra });
   if (memory) run.memory = memory;
   run.correction = '';
   if (needScreenshot && !run.wantShot) { run.wantShot = true; return next(run); }
@@ -470,6 +512,82 @@ async function safeNext(run) {
     halt(run, e.message || 'Could not continue.');
   }
 }
+/* ---------- tabs as tools ---------- */
+const webTarget = value => { try { const url = new URL(value); if (url.username || url.password) return null; return url.protocol === 'https:' || (url.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(url.hostname)) ? url.href : null; } catch { return null; } };
+// Tab ids stay stable for the whole run, so a t2 the model learned in round one still means the same tab.
+function tabList(run) {
+  run.tokens = run.tokens || {}; run.tokenSeq = run.tokenSeq || 0;
+  const seen = new Map(Object.entries(run.tokens).map(([token, id]) => [id, token]));
+  return tabCache.map(tab => {
+    let token = seen.get(tab.id);
+    if (!token) { run.tokenSeq += 1; token = `t${run.tokenSeq}`; run.tokens[token] = tab.id; }
+    return { token, tab };
+  });
+}
+function tabByToken(run, token) {
+  const tab = tabCache.find(item => item.id === run.tokens?.[token]);
+  if (!tab) throw new Error(`Tab ${token} is closed or no longer listed. Check the TABS list and pick another.`);
+  return tab;
+}
+async function waitForTab(tabId, timeout = 9000) {
+  const started = Date.now();
+  while (Date.now() - started < timeout) {
+    const tab = await chrome.tabs.get(tabId).catch(() => null);
+    if (!tab) return null;
+    if (tab.status === 'complete') return tab;
+    await sleep(220);
+  }
+  return chrome.tabs.get(tabId).catch(() => null);
+}
+// One tab acts at a time, but the agent can move between tabs without losing the page it was on.
+// That is what makes research in a new tab, then acting back in the original, a single run.
+async function actOnTabs(run, action) {
+  if (action.type === 'open') {
+    const url = webTarget(action.url) || (action.query ? webTarget(`https://duckduckgo.com/?q=${encodeURIComponent(String(action.query).slice(0, 200))}`) : null);
+    if (!url) throw new Error('That address is not an HTTPS page.');
+    if ((run.opened || []).length >= 3) throw new Error('This task already opened three tabs. Use one of them, or focus a tab the user already has.');
+    const tab = await chrome.tabs.create({ url, active: true });
+    await waitForTab(tab.id);
+    run.opened = [...(run.opened || []), tab.id];
+    run.actingTabId = tab.id;
+    send('group', { tabId: tab.id }).catch(() => {});
+    run.allow = [...new Set([...run.allow, new URL(url).origin])];
+    pushMessage('note', `Opened ${hostOf(url)} in a new tab and switched to it.`);
+    return { url, effect: { verified: true } };
+  }
+  if (action.type === 'focus') {
+    const tab = tabByToken(run, action.tab);
+    if (!tab.supported) throw new Error('That tab is a Chrome page the agent cannot drive. Pick another from the TABS list.');
+    await chrome.tabs.update(tab.id, { active: true });
+    await sleep(320);
+    run.actingTabId = tab.id;
+    if (tab.url) run.allow = [...new Set([...run.allow, new URL(tab.url).origin])];
+    pushMessage('note', `Back in ${shortTitle(tab)}.`);
+    return { url: tab.url, effect: { verified: true } };
+  }
+  if (action.type === 'gather') {
+    const fallback = tabList(run).filter(({ tab }) => tab.id !== run.actingTabId && tab.supported).map(({ token }) => token);
+    const tokens = [...new Set(action.tabs?.length ? action.tabs : fallback)].slice(0, 5);
+    if (!tokens.length) throw new Error('There is no other tab to gather from yet. Open one first.');
+    const pages = [];
+    for (const token of tokens) {
+      const tab = tabByToken(run, token);
+      if (!tab.supported) continue;
+      const page = await send('context', { tabId: tab.id }).catch(() => null);
+      if (page?.text) pages.push(`— ${shortTitle(tab)} (${hostOf(tab.url)})\n${String(page.text).slice(0, 4000)}`);
+    }
+    if (!pages.length) throw new Error('Those tabs had no readable text. Let them load, then gather again.');
+    pushMessage('note', `Read ${pages.length} tab${pages.length === 1 ? '' : 's'} at once.`);
+    return { text: pages.join('\n\n'), effect: { verified: true } };
+  }
+  const tab = tabByToken(run, action.tab);
+  if (!(run.opened || []).includes(tab.id)) throw new Error('Only a tab this task opened can be closed.');
+  await chrome.tabs.remove(tab.id).catch(() => {});
+  run.opened = run.opened.filter(id => id !== tab.id);
+  if (run.actingTabId === tab.id) run.actingTabId = tabCache.find(item => item.id === run.homeTabId)?.id || tabCache.find(item => item.id !== tab.id)?.id || null;
+  pushMessage('note', `Closed the tab for ${hostOf(tab.url)}.`);
+  return { effect: { verified: true } };
+}
 async function executeOne(run, current) {
   if (!current || workflow !== run) return 'stop';
   const action = current.action;
@@ -487,7 +605,7 @@ async function executeOne(run, current) {
         pushMessage('note', `Extended this task to ${new URL(action.url).hostname}.`);
       }
     }
-    result = await send('act', { ...current, goal: run.goal, intent: [run.goal, ...plan.map(item => item.title)].join('\n'), allow: run.allow, automatic: run.mode === 'autopilot' });
+    result = TAB_STEPS.has(action.type) ? await actOnTabs(run, action) : await send('act', { ...current, goal: run.goal, intent: [run.goal, ...plan.map(item => item.title)].join('\n'), allow: run.allow, automatic: run.mode === 'autopilot' });
   }
   catch (error) {
     if (workflow !== run) return 'stop';
@@ -512,9 +630,9 @@ async function executeOne(run, current) {
   const changed = verified !== false;
   if (changed) { run.evidence = (run.evidence || 0) + 1; run.stalled = 0; run.recovered = 0; run.retries = 0; run.lastHash = ''; run.apiRetries = 0; }
   else run.stalled = (run.stalled || 0) + 1;
-  const note = action.type === 'read' && result?.text ? `page excerpt: ${String(result.text).slice(0, 1500)}` : '';
+  const note = ['read', 'gather'].includes(action.type) && result?.text ? `page excerpt: ${String(result.text).slice(0, 1500)}` : '';
   run.steps.push({ type: action.type, description: action.description || '', ok: true, changed, page: current.url, note, code: result?.code || '', ref: action.ref, x: current.action.x, y: current.action.y, url: action.url, direction: action.direction, text: action.type === 'type' ? action.text : undefined });
-  recordActivity(action, current.url, result, 0, null, { changed, fallback: !!result?.fallback });
+  recordActivity(action, result?.url || current.url, result, 0, null, { changed, fallback: !!result?.fallback });
   currentAction(null);
   return 'ok';
 }
@@ -527,7 +645,7 @@ async function startWorkflow(goal, skill) {
   // A clicked or named skill wins; otherwise a Google page plus summarising words picks it up by itself.
   const chosen = skill || builtinFor(acting.url, goal);
   chat.goal = goal; chat.title = goal.slice(0, 60);
-  workflow = { goal, skill: chosen || null, steps: [], mode, actingTabId: acting.id, contextIds: [...contextIds], stalled: 0, lastHash: '', queue: [], evidence: 0, unproven: 0, recovered: 0, retries: 0, apiRetries: 0, keepGoing: 0, allow: [new URL(acting.url).origin], memory: null, wantShot: false };
+  workflow = { goal, skill: chosen || null, steps: [], mode, actingTabId: acting.id, homeTabId: acting.id, contextIds: [...contextIds], opened: [], tokens: {}, tokenSeq: 0, stalled: 0, lastHash: '', queue: [], evidence: 0, unproven: 0, recovered: 0, retries: 0, apiRetries: 0, keepGoing: 0, allow: [new URL(acting.url).origin], memory: null, wantShot: false };
   const run = workflow;
   plan = [];
   pushMessage('user', goal);
