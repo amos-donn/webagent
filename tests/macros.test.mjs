@@ -101,3 +101,39 @@ test('a failed step hands the rest of the macro to the agent in a message it can
   assert.match(prompt, /3\. Click CSV/);
   assert.doesNotMatch(prompt, /1\. Click Reports/, 'steps already done are not repeated');
 });
+
+test('a task that moves to another tab becomes a step the replay can follow', () => {
+  let steps = Macros.append([], { type: 'switch', url: 'https://example.com/inbox' });
+  steps = Macros.append(steps, { type: 'click', target: [save()], label: 'Open' });
+  steps = Macros.append(steps, { type: 'switch', url: 'https://mail.example.com/thread/1' });
+  assert.deepEqual(steps.map(step => step.type), ['switch', 'click', 'switch']);
+  assert.deepEqual(steps.map(Macros.label), ['Switch to example.com', 'Click Open', 'Switch to mail.example.com']);
+});
+
+test('a switch back to the page it is already on is not stored twice', () => {
+  const once = Macros.append([], { type: 'switch', url: 'https://example.com/a' });
+  const twice = Macros.append(once, { type: 'switch', url: 'https://example.com/a' });
+  assert.equal(twice.length, 1);
+  assert.equal(twice[0].url, 'https://example.com/a');
+  const other = Macros.append(twice, { type: 'switch', url: 'https://example.com/b' });
+  assert.equal(other.length, 2, 'a different page is a real move');
+});
+
+test('a switch step survives pruning only when it names a web page', () => {
+  const steps = Macros.prune([
+    { type: 'switch', url: 'https://example.com/a' },
+    { type: 'switch', url: 'https://example.com/a' },
+    { type: 'switch', url: 'chrome://settings' },
+    { type: 'click', target: [save()], label: 'Save' }
+  ]);
+  assert.deepEqual(steps.map(step => step.type), ['switch', 'click']);
+  assert.equal(steps[0].url, 'https://example.com/a');
+});
+
+test('a page is recognised by address, ignoring the fragment and a trailing slash', () => {
+  assert.equal(Macros.pageKey('https://Example.com/inbox/?q=1#top'), Macros.pageKey('https://example.com/inbox?q=1'));
+  assert.equal(Macros.pageLoose('https://example.com/inbox?q=1'), Macros.pageLoose('https://example.com/inbox/?q=2'));
+  assert.notEqual(Macros.pageLoose('https://example.com/a'), Macros.pageLoose('https://example.com/b'));
+  assert.notEqual(Macros.pageKey('https://example.com/a'), Macros.pageKey('https://other.example/a'));
+  assert.equal(Macros.pageKey('not a url'), '');
+});

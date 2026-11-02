@@ -7,6 +7,7 @@ const VERBS = {
   write: ['Writing with Gemini', 'Wrote'], read: ['Reading the page', 'Read the page'],
   scroll: ['Scrolling', 'Scrolled'], wait: ['Waiting', 'Waited'],
   navigate: ['Opening the page', 'Opened the page'], key: ['Pressing a key', 'Pressed a key'],
+  switch: ['Switching tabs', 'Switched tabs'],
   switch: ['Switching tabs', 'Switched tabs'], open: ['Opening a new page', 'Opened a new page'],
   gather: ['Reading tabs', 'Read the tabs'], close: ['Closing the tab', 'Closed the tab'],
   select: ['Choosing an option', 'Chose an option'], inspect: ['Looking at the page', 'Looked at the page']
@@ -1261,7 +1262,7 @@ function renderMacros() {
   if (rec) {
     if ($('rec-name').value !== rec.name) $('rec-name').value = rec.name;
     const box = $('rec-steps'); box.textContent = '';
-    if (!rec.steps.length) { const empty = document.createElement('p'); empty.className = 'hint'; empty.textContent = 'Nothing yet — click and type in the page.'; box.append(empty); }
+    if (!rec.steps.length) { const empty = document.createElement('p'); empty.className = 'hint'; empty.textContent = 'Nothing yet — click and type in the page. Working in another tab is recorded too.'; box.append(empty); }
     rec.steps.forEach((step, index) => {
       const row = document.createElement('div'); row.className = 'rec-step';
       const text = document.createElement('span'); text.textContent = `${index + 1}. ${Macros.label(step)}`; text.title = Macros.label(step);
@@ -1313,6 +1314,41 @@ function onMacroEvent(event) {
   saveRec(); renderMacros();
 }
 
+// Recording outlives one tab. A click that opens a tab, or a person who moves to another tab to carry
+// on, keeps the same recording: candidate tabs are armed so their events exist at all, and the first
+// event from a tab other than the current one becomes a switch step. A tab that is only looked at
+// records nothing, because nothing happened in it.
+const armedTabs = new Set();
+async function armRecordTab(tabId) {
+  if (!rec || armedTabs.has(tabId)) return;
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  if (!tab?.url || !/^https?:/i.test(tab.url)) return;
+  armedTabs.add(tabId);
+  await send('record-target', { tabId }).catch(() => armedTabs.delete(tabId));
+}
+chrome.tabs.onActivated.addListener(({ tabId }) => { if (rec && tabId !== rec.tabId) armRecordTab(tabId).catch(() => {}); });
+// A tab that merely loads in the background is not a place anyone worked, so only the active tab is
+// armed on load — that is what catches a popup that opens blank and then navigates.
+chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
+  if (!rec || tabId === rec.tabId || info.status !== 'complete' || !tab?.active) return;
+  armRecordTab(tabId).catch(() => {});
+});
+
+function macroEnterTab(tabId, event, senderTab) {
+  // Only the tab being looked at counts: a page reloading itself in the background is not a move the
+  // person made, and recording it would send a replay to an unrelated tab.
+  if (!rec || !senderTab?.active) return;
+  const url = event?.type === 'page' ? event.href : senderTab?.url;
+  // The same page in another tab is not a move the replay has to make.
+  if (!url || !/^https?:/i.test(url) || Macros.pageKey(url) === Macros.pageKey(rec.href)) return;
+  rec.tabId = tabId;
+  rec.href = url;
+  rec.lastAt = Date.now();
+  rec.steps = Macros.append(rec.steps, { type: 'switch', url, title: event?.title || senderTab?.title || '', at: rec.lastAt });
+  saveRec(); renderMacros();
+  notify(`Recording continues in ${Macros.host(url) || 'another tab'}.`);
+}
+
 async function startRecording() {
   if (rec) return;
   if (workflow || macroRun) throw new Error('Stop the run in progress before recording.');
@@ -1324,14 +1360,16 @@ async function startRecording() {
   const session = crypto.randomUUID();
   const out = await send('record-start', { tabId: tab.id, session });
   rec = { session, tabId: out.tabId, startUrl: out.url, href: out.url, steps: [], name: Macros.nameFor(tab.title, out.url), lastAt: 0 };
+  armedTabs.clear();
   await saveRec();
   renderMacros();
-  notify('Recording. Do the task in the page; press Save when you are done.');
+  notify('Recording. Do the task by hand — switching tabs or opening a new one keeps recording; press Save when you are done.');
 }
 
 async function stopRecording() {
   const current = rec;
   rec = null;
+  armedTabs.clear();
   await chrome.storage.session.remove(REC_STEPS_KEY).catch(() => {});
   if (current) await send('record-stop', { tabId: current.tabId, session: current.session }).catch(() => {});
   renderMacros();
@@ -1361,19 +1399,58 @@ async function resumeRecording() {
 
 // One step of a replay. A step waits for its control instead of sleeping, so a slow page is slower,
 // not broken; a step that never finds it stops the macro and hands the rest to the agent.
+// A switch step names a page, not a tab id: by the time a macro runs the tab that held it may be
+// closed, so an open tab with that address is reused and one is opened when there is none. A query
+// string that shifted still lands on the right page once a just-opened tab has had a moment to load.
+async function switchToRecordedTab(step) {
+  await permission(step.url).catch(() => {});
+  const exact = Macros.pageKey(step.url), loose = Macros.pageLoose(step.url);
+  const here = (await chrome.tabs.get(macroRun.tabId).catch(() => null))?.windowId;
+  const pick = list => list.find(tab => tab.windowId === here) || list[0] || null;
+  const started = Date.now();
+  while (Date.now() - started < 8000) {
+    const tabs = (await chrome.tabs.query({}).catch(() => [])).filter(tab => tab.id && tab.url && /^https?:/i.test(tab.url));
+    const found = pick(tabs.filter(tab => Macros.pageKey(tab.url) === exact)) || (Date.now() - started > 2500 ? pick(tabs.filter(tab => Macros.pageLoose(tab.url) === loose)) : null);
+    if (found) {
+      if (!stayPut && !found.active) await chrome.tabs.update(found.id, { active: true }).catch(() => {});
+      return found.id;
+    }
+    await sleep(250);
+  }
+  const created = await chrome.tabs.create({ url: step.url, active: !stayPut });
+  const ready = await waitForTab(created.id, 15000);
+  if (!ready?.id) throw new Error(`The tab for ${Macros.host(step.url) || 'that step'} is gone and could not be opened again.`);
+  return ready.id;
+}
+
+function finishStep(step, result, started, url) {
+  const shown = step.type === 'fill' ? 'type' : step.type === 'secret' ? 'wait' : step.type;
+  recordActivity({ type: shown, description: Macros.label(step) }, url, result, Math.round(performance.now() - started), null, { changed: result?.effect?.verified !== false });
+  currentAction(null);
+}
+
 async function playStep(step, index, macro) {
-  const tabId = macroRun.tabId;
-  const tab = await chrome.tabs.get(tabId).catch(() => null);
-  if (!tab?.url) throw new Error('The tab this macro runs in was closed.');
   loading(`Replaying ${index + 1}/${macro.steps.length}`, ICONS[step.type] || 'arrow-right');
   currentAction(Macros.label(step));
   const started = performance.now();
-  const base = { tabId, url: tab.url, stayPut, settleMs: settleFor() };
+  let tab = await chrome.tabs.get(macroRun.tabId).catch(() => null);
+  // The person moved tab while doing the task, so the replay follows the page instead of driving
+  // whichever tab it happened to start in.
+  if (step.type === 'switch') {
+    const moved = await switchToRecordedTab(step);
+    macroRun.tabId = moved;
+    actingTabId = moved;
+    tab = await chrome.tabs.get(moved).catch(() => null);
+    renderTabs();
+    return finishStep(step, { url: tab?.url || step.url }, started, tab?.url || step.url);
+  }
+  if (!tab?.url) throw new Error('The tab this macro runs in was closed.');
+  const base = { tabId: tab.id, url: tab.url, stayPut, settleMs: settleFor() };
   let result = {};
   if (step.type === 'navigate') {
     await permission(step.url).catch(() => {});
     result = await send('act', { ...base, action: { type: 'navigate', url: step.url, description: Macros.label(step) } });
-    await waitForTab(tabId, 12000);
+    await waitForTab(tab.id, 12000);
   } else if (step.type === 'key') {
     result = await send('act', { ...base, action: { type: 'key', key: step.key, description: Macros.label(step) } });
   } else {
@@ -1385,9 +1462,7 @@ async function playStep(step, index, macro) {
     // The value was never recorded, so the replay stops here and waits for the person to type it.
     if (step.type === 'secret') await macroHold(`Type your own value into “${step.label || 'that field'}” in the page, then press Continue.`);
   }
-  const shown = step.type === 'fill' ? 'type' : step.type === 'secret' ? 'wait' : step.type;
-  recordActivity({ type: shown, description: Macros.label(step) }, result?.url || tab.url, result, Math.round(performance.now() - started), null, { changed: result?.effect?.verified !== false });
-  currentAction(null);
+  finishStep(step, result, started, result?.url || tab.url);
 }
 
 function macroHold(message) {
@@ -1630,7 +1705,12 @@ chrome.runtime.onMessage.addListener((message, sender) => {
   if (sender?.id && sender.id !== chrome.runtime.id) return;
   if (message?.type === 'pointerBlocked') { notify('Pointer is on, but this page blocks the cursor overlay — the click still went ahead.', true); return; }
   // The session is on the envelope: it belongs to the recording, not to the action it describes.
-  if (message?.type === 'macro-event' && rec && message.session === rec.session) onMacroEvent(message.event);
+  if (message?.type === 'macro-event' && rec && message.session === rec.session) {
+    // The sender says which tab the event came from, which is how one recording spans several tabs.
+    const from = sender?.tab?.id;
+    if (from && from !== rec.tabId) macroEnterTab(from, message.event, sender.tab);
+    onMacroEvent(message.event);
+  }
 });
 
 (async () => {

@@ -840,7 +840,8 @@ function uninstallRecorder(session) {
 // and every navigation re-arms the recorder on the new document.
 async function armRecorder(tabId) {
   const saved = (await chrome.storage.session.get(RECORD_KEY).catch(() => ({})))[RECORD_KEY];
-  if (!saved || saved.tabId !== tabId) return false;
+  const tabIds = saved?.tabIds || (saved?.tabId ? [saved.tabId] : []);
+  if (!tabIds.includes(tabId)) return false;
   await chrome.scripting.executeScript({ target: { tabId }, func: installRecorder, args: [saved.session] }).catch(() => {});
   return true;
 }
@@ -1092,14 +1093,27 @@ async function handle(message) {
     if (!permitted(tab.url)) throw new Error('Recording needs an HTTPS page (or a local development page). Chrome internal pages are blocked.');
     const session = String(message.session || '');
     if (!session) throw new Error('Missing recording session.');
-    await chrome.storage.session.set({ [RECORD_KEY]: { session, tabId: tab.id, startUrl: tab.url, at: Date.now() } });
+    await chrome.storage.session.set({ [RECORD_KEY]: { session, tabId: tab.id, tabIds: [tab.id], startUrl: tab.url, at: Date.now() } });
     await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: installRecorder, args: [session] });
     return { session, tabId: tab.id, url: tab.url };
   }
+  // A recording is not tied to one tab: a click that opens a tab, or a person who moves on to another
+  // one, continues the same recording. Every tab that is worked in gets the recorder, and is kept in
+  // the list so a navigation there re-arms it too.
+  if (message.type === 'record-target') {
+    const tab = await getTab(message.tabId);
+    const saved = (await chrome.storage.session.get(RECORD_KEY).catch(() => ({})))[RECORD_KEY];
+    if (!saved?.session) return { armed: false };
+    if (!permitted(tab.url)) throw new Error('That page cannot be recorded.');
+    const tabIds = [...new Set([...(saved.tabIds || [saved.tabId]).filter(Boolean), tab.id])].slice(-12);
+    await chrome.storage.session.set({ [RECORD_KEY]: { ...saved, tabIds } });
+    await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: installRecorder, args: [saved.session] });
+    return { tabId: tab.id, armed: tabIds.length };
+  }
   if (message.type === 'record-stop') {
     const saved = (await chrome.storage.session.get(RECORD_KEY).catch(() => ({})))[RECORD_KEY];
-    const tabId = message.tabId || saved?.tabId;
-    if (tabId) await chrome.scripting.executeScript({ target: { tabId }, func: uninstallRecorder, args: [message.session || saved?.session || ''] }).catch(() => {});
+    const tabIds = [...new Set([...(saved?.tabIds || []), saved?.tabId, message.tabId].filter(Boolean))];
+    for (const tabId of tabIds) await chrome.scripting.executeScript({ target: { tabId }, func: uninstallRecorder, args: [message.session || saved?.session || ''] }).catch(() => {});
     await chrome.storage.session.remove(RECORD_KEY).catch(() => {});
     return { stopped: true };
   }

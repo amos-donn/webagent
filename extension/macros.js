@@ -10,11 +10,26 @@
   // structural CSS path is the last thing to try rather than the first: a class hash changes on every
   // deploy, a button's label usually does not.
   const ORDER = ['testid', 'role', 'label', 'name', 'id', 'text', 'css'];
-  const TYPES = ['click', 'fill', 'select', 'key', 'navigate', 'secret'];
+  const TYPES = ['click', 'fill', 'select', 'key', 'navigate', 'secret', 'switch'];
   const STEPS = 200;
 
   const clean = (value, max = 160) => String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, max);
   const host = value => { try { return new URL(value).hostname.replace(/^www\./, ''); } catch { return ''; } };
+  // A step names a page, not a tab: by the time a macro is replayed the tab that held it is often
+  // closed. The hash is dropped because it rarely makes a page different; the query is kept because
+  // it often does.
+  function pageKey(value) {
+    try {
+      const url = new URL(value);
+      return `${url.origin}${url.pathname.replace(/\/$/, '')}${url.search}`.toLowerCase();
+    } catch { return ''; }
+  }
+  function pageLoose(value) {
+    try {
+      const url = new URL(value);
+      return `${url.origin}${url.pathname.replace(/\/$/, '')}`.toLowerCase();
+    } catch { return ''; }
+  }
 
   function normalise(candidate) {
     if (!candidate || typeof candidate !== 'object') return null;
@@ -55,6 +70,7 @@
   function label(step) {
     if (!step) return '';
     if (step.type === 'navigate') return `Open ${host(step.url) || clean(step.url, 60)}`;
+    if (step.type === 'switch') return `Switch to ${host(step.url) || clean(step.url, 60)}`;
     if (step.type === 'key') return `Press ${clean(step.key, 24) || 'a key'}`;
     const candidate = first(step);
     const name = clean(step.label, 70) || clean(candidate?.name, 70) || clean(candidate?.value, 70) || 'the element';
@@ -72,6 +88,11 @@
     const last = list[list.length - 1];
     if (step.type === 'fill' && last?.type === 'fill' && targetKey(last) === targetKey(step)) {
       list[list.length - 1] = { ...last, text: step.text, at: step.at || last.at };
+      return list;
+    }
+    // Going back to the tab you are already in is not a step the replay needs.
+    if (step.type === 'switch' && last?.type === 'switch' && last.url === step.url) {
+      list[list.length - 1] = { ...last, at: step.at || last.at };
       return list;
     }
     list.push(step);
@@ -94,6 +115,14 @@
         const key = clean(raw.key, 40);
         if (!key) continue;
         out.push({ type: 'key', key, at: raw.at });
+        continue;
+      }
+      if (raw.type === 'switch') {
+        const url = String(raw.url ?? '').slice(0, 2000);
+        if (!/^https?:\/\//i.test(url)) continue;
+        const previous = out[out.length - 1];
+        if (previous?.type === 'switch' && previous.url === url) continue;
+        out.push({ type: 'switch', url, at: raw.at });
         continue;
       }
       const target = rank(raw.target);
@@ -130,5 +159,5 @@
     ].filter(Boolean).join('\n');
   }
 
-  return { ORDER, TYPES, STEPS, rank, append, prune, label, summary, nameFor, recovery, host };
+  return { ORDER, TYPES, STEPS, rank, append, prune, label, summary, nameFor, recovery, host, pageKey, pageLoose };
 });

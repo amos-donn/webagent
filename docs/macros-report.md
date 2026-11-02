@@ -118,6 +118,18 @@ does not lose them.
   have nowhere to go. Reopening the panel resumes from session storage; the tab is re-armed on its
   next navigation.
 
+### Across tabs
+
+A recorded task is rarely finished in one tab, and the first version of this recorder was: it armed a single tab id, so switching tabs mid-recording silently captured nothing, and a click that opened a tab recorded the click but nothing about where the person went next.
+
+The fix is to treat a tab as a place a page happens to be, not as an identity. Three changes carry it:
+
+- **Arming follows the person.** The recorder is injected into every tab that becomes active while recording, and `chrome.storage.session` keeps the list of armed tab ids (so a navigation in any of them re-arms it). A tab that only loads in the background is not armed: a page reloading itself is not a move anyone made.
+- **The first event from another tab is a step.** The panel already received the page's messages, and `sender.tab.id` says which tab sent one. When that differs from the tab being recorded, and the sender is the active tab, a `switch` step is stored with the page's address. Nothing is stored for a tab the person merely looked at, which keeps the list honest: it reads as what happened, not as what was open.
+- **Replay finds the page, not the tab.** A tab id is meaningless minutes later, so the step stores the URL. Replay polls open tabs for a matching `origin + pathname + query` (ignoring the fragment), falls back to origin and pathname after 2.5 s so a shifted query string still lands, and creates the tab only if none exists within 8 s. It then moves the agent's own working tab, which is why the pointer and the step log follow.
+
+What this buys is also what it costs: two tabs showing the same page are indistinguishable, so the replay picks the one in the window it is working in; and a macro that ends in a second tab leaves both tabs open afterwards, since closing them is a decision the person should make.
+
 ## 4. Risks and what would prove them wrong
 
 | Risk | Mitigation in 1.3.0 | What would show it failing |
