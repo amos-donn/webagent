@@ -681,3 +681,43 @@ test('the final report speaks as the agent, not about it', async () => {
     assert.match(prompt, /Never "the agent filled in the form"/);
   } finally { mock.restore(); }
 });
+
+test('a follow-up message carries the earlier conversation into the prompt', async () => {
+  const mock = scripted([{ actions:[click()] }]);
+  const history = [{ role:'user', text:'Fill in the first form' }, { role:'agent', text:'I filled in the first form and submitted it.' }];
+  try {
+    const response = await worker.fetch(request({ ...observation, goal:'Do the same for the second one', history }), { DB:db, GEMINI_API_KEY:'test-key' });
+    assert.equal(response.status, 200);
+    const prompt = said(mock.calls[0]);
+    assert.match(prompt, /EARLIER IN THIS CHAT/);
+    assert.match(prompt, /USER: Fill in the first form/);
+    assert.match(prompt, /YOU: I filled in the first form and submitted it\./);
+    assert.ok(prompt.indexOf('USER: Fill in the first form') < prompt.indexOf('PAGE: https://example.com/'), 'the chat sits above the current page');
+  } finally { mock.restore(); }
+  const planner = scripted([{ steps:['Open the menu'] }]);
+  try {
+    const response = await worker.fetch(request({ goal:'Do the same for the second one', url:'https://example.com/', history }, '/plan'), { DB:db, GEMINI_API_KEY:'test-key' });
+    assert.equal(response.status, 200);
+    assert.match(said(planner.calls[0]), /EARLIER IN THIS CHAT/, 'the planner sees the chat too');
+  } finally { planner.restore(); }
+});
+
+test('chat history is capped at ten turns, clipped, and junk cannot break a run', async () => {
+  const mock = scripted([{ actions:[click()] }]);
+  const history = [...Array.from({ length:14 }, (_, i) => ({ role: i % 2 ? 'agent' : 'user', text:`turn ${i}` })), { role:'user', text:'x'.repeat(2000) }, { role:'agent' }];
+  try {
+    const response = await worker.fetch(request({ ...observation, history }), { DB:db, GEMINI_API_KEY:'test-key' });
+    assert.equal(response.status, 200);
+    const prompt = said(mock.calls[0]);
+    assert.doesNotMatch(prompt, /turn 4\b/);
+    assert.match(prompt, /turn 13/);
+    assert.match(prompt, /x{600}/);
+    assert.doesNotMatch(prompt, /x{601}/);
+  } finally { mock.restore(); }
+  const junk = scripted([{ actions:[click()] }]);
+  try {
+    const response = await worker.fetch(request({ ...observation, history:'not an array' }), { DB:db, GEMINI_API_KEY:'test-key' });
+    assert.equal(response.status, 200, 'a malformed history is ignored, not a 400');
+    assert.doesNotMatch(said(junk.calls[0]), /EARLIER IN THIS CHAT/);
+  } finally { junk.restore(); }
+});

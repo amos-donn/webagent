@@ -440,9 +440,19 @@ function toggleTabsBox() {
 }
 
 /* ---------- chats ---------- */
+// The topbar badge is the chat title, not a fixed product label: the panel should say what it is
+// working on. Clicking it opens the chat list.
+function renderChatTitle() {
+  const label = $('chat-title');
+  if (!label) return;
+  const title = (chat?.title || '').trim();
+  label.textContent = title && title !== 'New chat' ? title : 'agent';
+  label.title = title ? `${title} — open chats` : 'Open chats';
+}
 function newChatRecord() { return { id: crypto.randomUUID(), title: 'New chat', goal: '', messages: [], plan: [], steps: [], at: Date.now() }; }
 async function persist() {
   if (!chat) return;
+  renderChatTitle();
   chat.plan = plan;
   chat.messages = chat.messages.slice(-MAX_MESSAGES);
   if (workflow) chat.steps = workflow.steps;
@@ -508,6 +518,7 @@ function renderMessage(message) {
   return el;
 }
 function renderChat() {
+  renderChatTitle();
   const box = $('steps'); box.textContent = '';
   if (!chat.messages.length) { box.append(welcome()); return; }
   for (const message of chat.messages) box.append(renderMessage(message));
@@ -628,6 +639,7 @@ function stop() {
   workflow = null; proposal = null; currentAction(null);
   $('approval').hidden = true; $('stop').hidden = true; $('start').hidden = false;
   $('goal').disabled = false; $('loading').hidden = true;
+  $('run-dot').hidden = true;
   if (ended && chat?.id === ended.chatId) pushMessage('timing', taskLine(ended));
   renderPlan(); renderSkillChip(); persist().catch(() => {});
 }
@@ -791,7 +803,7 @@ async function next(run, prefetched) {
   const sendImage = !!shot.image;
   // Every field is normalised here, because the Worker's only answer to a bad one is a 400 that the
   // panel cannot explain. Context tabs belong in this body: dropping them silently cost attachments.
-  const body = { goal:aimed(run), speed, intent:[run.goal, ...plan.map(item => item.title)].join('\n'), todos:plan, steps:run.steps.slice(-60), url:shot.url, title:shot.title, text:String(shot.text || ''), ...(sendImage ? { image: shot.image } : {}), width:Math.max(1, Math.round(Number(naturalWidth) || width)), height:Math.max(1, Math.round(Number(naturalHeight) || height)), elements, refs, tabs, contexts:extra, memory: run.memory || undefined, stalled:run.stalled, automatic:run.mode === 'autopilot', correction: run.correction || undefined };
+  const body = { goal:aimed(run), speed, intent:[run.goal, ...plan.map(item => item.title)].join('\n'), todos:plan, steps:run.steps.slice(-60), url:shot.url, title:shot.title, text:String(shot.text || ''), ...(sendImage ? { image: shot.image } : {}), width:Math.max(1, Math.round(Number(naturalWidth) || width)), height:Math.max(1, Math.round(Number(naturalHeight) || height)), elements, refs, tabs, contexts:extra, memory: run.memory || undefined, stalled:run.stalled, automatic:run.mode === 'autopilot', history: run.history?.length ? run.history : undefined, correction: run.correction || undefined };
   // Serialised once and sent verbatim, so the byte count below is the payload the Worker really gets.
   const payload = JSON.stringify(body);
   run.timing = { at: Date.now(), round: run.steps.length + 1, goal: run.goal.slice(0, 80), speed, refs: refs.length, image: sendImage, bytes: new TextEncoder().encode(payload).length, observeMs, actionMs: 0, actions: 0, settle: settleFor() };
@@ -1013,8 +1025,10 @@ async function startWorkflow(goal, skill) {
   if (!chat) { chat = newChatRecord(); chats.unshift(chat); }
   // A clicked or named skill wins; otherwise a Google page plus summarising words picks it up by itself.
   const chosen = skill || builtinFor(acting.url, goal);
+  const history = chatHistory();
   chat.goal = goal; chat.title = goal.slice(0, 60);
-  workflow = { goal, skill: chosen || null, steps: [], mode, taskStart: Date.now(), chatId: chat.id, spent: null, actingTabId: acting.id, homeTabId: acting.id, contextIds: [...contextIds], opened: [], tokens: {}, tokenSeq: 0, stalled: 0, lastHash: '', queue: [], evidence: 0, unproven: 0, recovered: 0, retries: 0, apiRetries: 0, keepGoing: 0, allow: [new URL(acting.url).origin], memory: null, wantShot: false, contextTabs: [], warned: [] };  const run = workflow;
+  workflow = { goal, skill: chosen || null, steps: [], mode, taskStart: Date.now(), chatId: chat.id, spent: null, history, actingTabId: acting.id, homeTabId: acting.id, contextIds: [...contextIds], opened: [], tokens: {}, tokenSeq: 0, stalled: 0, lastHash: '', queue: [], evidence: 0, unproven: 0, recovered: 0, retries: 0, apiRetries: 0, keepGoing: 0, allow: [new URL(acting.url).origin], memory: null, wantShot: false, contextTabs: [], warned: [] };  const run = workflow;
+  $('run-dot').hidden = false;
   plan = [];
   pushMessage('user', goal);
   if (chosen) pushMessage('note', `Using the built-in “${chosen.name}” skill for this page.`);
@@ -1034,7 +1048,7 @@ async function startWorkflow(goal, skill) {
     }
     // A slow planner must not hold the whole run on "Reading the page": it gets a short budget and the
     // page work starts with or without a checklist.
-    const [planned, shot] = await Promise.allSettled([timed(api('/plan', { goal: aimed(run), url: acting.url, title: acting.title }), PLAN_TIMEOUT, 'The planner did not answer in time.'), observed]);
+    const [planned, shot] = await Promise.allSettled([timed(api('/plan', { goal: aimed(run), url: acting.url, title: acting.title, history: run.history?.length ? run.history : undefined }), PLAN_TIMEOUT, 'The planner did not answer in time.'), observed]);
     if (workflow !== run) return;
     if (shot.status === 'rejected') throw shot.reason;
     if (planned.status === 'fulfilled' && planned.value.todos?.length) plan = planned.value.todos;
@@ -1085,6 +1099,22 @@ function builtinFor(url, goal = '') {
   return BUILTIN_SKILLS.find(skill => skill.hosts.includes(host)) || null;
 }
 const aimed = run => run.skill ? `${run.skill.prompt}\n\nUSER GOAL: ${run.goal}` : run.goal;
+// A follow-up message used to start from nothing: the Worker got the new goal and the page, so "do that
+// again for the second one" had no referent. The last turns and a digest of the previous run's steps
+// travel with every request now, and the Worker clips them before they reach the prompt.
+const CHAT_TURNS = 10;
+function chatHistory() {
+  if (!chat) return [];
+  const turns = [];
+  for (const message of chat.messages) {
+    if (!['user', 'report'].includes(message.role)) continue;
+    const text = String(message.text || '').trim();
+    if (text) turns.push({ role: message.role === 'user' ? 'user' : 'agent', text });
+  }
+  const previous = (chat.steps || []).filter(step => step.ok && step.description).slice(-8);
+  if (previous.length) turns.push({ role: 'agent', text: `What I already did in this chat: ${previous.map(step => `${step.type}${step.changed === false ? ' (no page change)' : ''}: ${String(step.description).slice(0, 90)}`).join(' | ')}` });
+  return turns.slice(-CHAT_TURNS);
+}
 function renderSkillChip() {
   const chip = $('skill-chip');
   const tab = tabCache.find(t => t.id === actingTabId) || tabCache.find(t => t.active);
@@ -1104,6 +1134,42 @@ async function saveSkill() {
   skills = [{ ...skill, at: Date.now() }, ...skills].slice(0, 20);
   await chrome.storage.local.set({ skills });
   notify(`Saved “${skill.name}”. Type / to run it.`);
+  renderSkills();
+}
+// Saved skills were write-only: /skill stored them and nothing listed or deleted them.
+function renderSkills() {
+  const box = $('skill-box'), list = $('skill-list');
+  if (!box || !list) return;
+  list.textContent = '';
+  box.hidden = !skills.length;
+  for (const skill of skills) {
+    const row = document.createElement('div'); row.className = 'skill-row';
+    const name = document.createElement('span'); name.textContent = skill.name || 'Skill'; name.title = skill.description || skill.prompt || '';
+    const drop = document.createElement('button'); drop.type = 'button'; drop.title = 'Delete this skill'; drop.setAttribute('aria-label', `Delete ${skill.name || 'skill'}`); setIcon(drop, 'x', 11);
+    drop.addEventListener('click', async () => {
+      skills = skills.filter(item => item !== skill);
+      await chrome.storage.local.set({ skills });
+      renderSkills();
+      notify(`Deleted “${skill.name || 'skill'}”.`);
+    });
+    row.append(name, drop); list.append(row);
+  }
+}
+// The panel never asked the Worker anything but a full run, so a typo in the URL or a missing key only
+// showed up as a failed task. /health answers in one request and names the model in use.
+async function testConnection() {
+  const status = $('worker-status');
+  status.hidden = false; status.classList.remove('bad');
+  status.textContent = 'Checking…';
+  try {
+    const res = await fetch(baseUrl() + '/health', { signal: AbortSignal.timeout(8000) });
+    const out = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(out.error || `Worker answered ${res.status}.`);
+    status.textContent = `Reachable · ${out.model || 'model unknown'} · ${out.provider || 'gemini'}`;
+  } catch (e) {
+    status.classList.add('bad');
+    status.textContent = `Not reachable: ${e.message}`;
+  }
 }
 function openHistory() { renderHistory(); if (!$('history-dialog').open) $('history-dialog').showModal(); }
 function openSaw() { if (!lastShot) { notify('No screenshot yet — run a task first.', true); return; } $('saw-image').src = lastShot; if (!$('saw-dialog').open) $('saw-dialog').showModal(); }
@@ -1157,7 +1223,11 @@ $('history-clear').addEventListener('click', async () => {
   renderHistory();
   notify('Chat history cleared.');
 });
-$('settings-btn').addEventListener('click', () => { if (!$('settings-dialog').open) $('settings-dialog').showModal(); });
+$('settings-btn').addEventListener('click', () => {
+  $('plan-mode').value = planMode;
+  renderSkills();
+  if (!$('settings-dialog').open) $('settings-dialog').showModal();
+});
 $('settings-close').addEventListener('click', event => { event.preventDefault(); $('settings-dialog').close(); });
 $('settings-dialog').addEventListener('click', event => { if (event.target === $('settings-dialog')) $('settings-dialog').close(); });
 $('history-dialog').addEventListener('click', event => { if (event.target === $('history-dialog')) $('history-dialog').close(); });
@@ -1186,6 +1256,19 @@ $('stay-toggle').addEventListener('change', async () => {
   stayPut = $('stay-toggle').checked;
   await chrome.storage.local.set({ stayPut });
   notify(stayPut ? 'Working in the background — switch tabs freely.' : 'Switching to the working tab before each action.');
+});
+// Plan mode lived only in /plan, /noplan and /auto-plan; the same three states belong in Settings.
+$('plan-mode').addEventListener('change', () => setPlanMode($('plan-mode').value));
+$('test-worker').addEventListener('click', testConnection);
+$('chat-title').addEventListener('click', openHistory);
+// Escape stops a run and Cmd/Ctrl+K jumps to the box, but a dialog owns Escape while it is open.
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape' && !document.querySelector('dialog[open]') && workflow) {
+    event.preventDefault(); stop(); notify('Workflow stopped.'); return;
+  }
+  if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+    event.preventDefault(); $('goal').focus();
+  }
 });
 $('timings-btn').addEventListener('click', openTimings);
 $('timings-close').addEventListener('click', event => { event.preventDefault(); $('timings-dialog').close(); });
@@ -1216,6 +1299,7 @@ chrome.runtime.onMessage.addListener(message => { if (message && message.type ==
   stayPut = saved.stayPut !== false;
   $('stay-toggle').checked = stayPut;
   planMode = ['auto', 'always', 'never'].includes(saved.planMode) ? saved.planMode : 'auto';
+  $('plan-mode').value = planMode;
   lastShot = saved.lastShot || '';
   $('saw-btn').hidden = !lastShot;
   timings = Array.isArray(saved.timings) ? saved.timings : [];

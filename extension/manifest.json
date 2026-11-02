@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Mezze — Browser Agent",
-  "version": "1.2.6",
+  "version": "1.2.7",
   "description": "A side-panel agent for multi-step browser workflows.",
   "minimum_chrome_version": "116",
   "permissions": [

@@ -92,6 +92,14 @@ Three settings decide how long a round takes, and all three are in **Settings**:
 
 The setting applies from the next action; a run already in flight keeps the speed it started with until the next round. A model that errors falls back to the next one down the chain rather than ending the run, and `GEMINI_MODEL`, when set, overrides the speed setting entirely.
 
+## The topbar, Settings, and continuing a chat
+
+The topbar badge is the current chat's title, not a fixed product label — click it to open the chat list — and a small accent dot appears while a run is live. **Escape** stops a running workflow and **Cmd/Ctrl+K** jumps to the task box; dialogs keep Escape for themselves.
+
+Settings covers the worker URL with a **Test connection** button that asks `GET /health` and names the model actually answering, the speed preset, whether to wait for slow pages, whether to stay on your tab, a **Checklist** control for the plan mode that used to be reachable only through `/plan`, `/noplan` and `/auto-plan`, and the list of saved skills with a delete button (they used to be write-only).
+
+A second message in the same chat is a continuation, not a fresh start: the panel sends the last ten turns plus a digest of the previous run's steps to both `/plan` and `/agent`, and the Worker clips them into an `EARLIER IN THIS CHAT` block above the current goal. So "do the same for the second one" has a referent, and the model does not repeat what it already finished. The current goal still outranks the history; the history is context, never a new instruction.
+
 ## What a round costs
 
 The hourglass button in the topbar (and `/timings`) opens the speed panel: how long whole tasks take, then what the last 60 rounds actually spent, as medians with a stacked bar and the last rounds listed, exportable as `mezze-timings.json`.
