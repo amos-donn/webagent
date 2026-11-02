@@ -645,3 +645,24 @@ test('a corrected round reports what both calls spent', async () => {
     assert.equal(index, 2);
   } finally { globalThis.fetch = original; }
 });
+
+test('the panel payload without a screenshot is accepted, past forty steps', async () => {
+  const mock = scripted([{ actions:[{ type:'click', ref:'e3', description:'Open the tickets page' }] }]);
+  try {
+    const steps = Array.from({ length: 45 }, (_, i) => ({ type:'read', description:`read step ${i}`, ok:true }));
+    const body = { goal:'Find the menu', speed:'fast', intent:'Find the menu', todos:[], steps, url:'https://example.com/', title:'Example', text:'Menu', width:1280, height:800, elements:[], refs:[{ ref:'e3', role:'link', name:'Tickets' }], tabs:[], contexts:[{ url:'https://other.example/', title:'Other', text:'Other page text' }], stalled:0, automatic:true };
+    const response = await worker.fetch(request(body), { DB:db, GEMINI_API_KEY:'test-key' });
+    assert.equal(response.status, 200, 'a long run must not start failing at step 41');
+    assert.match(said(mock.calls[0]), /Other page text/, 'attached tabs still reach the model');
+  } finally { mock.restore(); }
+});
+
+test('an invalid observation names the field that failed', async () => {
+  const mock = scripted([{ actions:[{ type:'click', ref:'e3', description:'x' }] }]);
+  try {
+    const response = await worker.fetch(request({ ...observation, width:0 }), { DB:db, GEMINI_API_KEY:'test-key' });
+    assert.equal(response.status, 400);
+    assert.match((await response.json()).error, /width/);
+    assert.equal(mock.calls.length, 0, 'a rejected body never reaches the model');
+  } finally { mock.restore(); }
+});

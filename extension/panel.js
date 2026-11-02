@@ -632,7 +632,9 @@ async function next(run, prefetched) {
   const done = plan.filter(item => item.done).length;
   loading(plan.length ? `Thinking · ${done}/${plan.length} plan steps · action ${run.steps.length + 1}/${STEP_LIMIT}` : `Thinking about action ${run.steps.length + 1}`, 'sparkle');
   const sendImage = !!shot.image;
-  const body = { goal:aimed(run), speed, intent:[run.goal, ...plan.map(item => item.title)].join('\n'), todos:plan, steps:run.steps, url:shot.url, title:shot.title, text:shot.text, ...(sendImage ? { image: shot.image } : {}), width:naturalWidth, height:naturalHeight, elements, refs, tabs, memory: run.memory || undefined, stalled:run.stalled, automatic:run.mode === 'autopilot', correction: run.correction || undefined, };
+  // Every field is normalised here, because the Worker's only answer to a bad one is a 400 that the
+  // panel cannot explain. Context tabs belong in this body: dropping them silently cost attachments.
+  const body = { goal:aimed(run), speed, intent:[run.goal, ...plan.map(item => item.title)].join('\n'), todos:plan, steps:run.steps.slice(-60), url:shot.url, title:shot.title, text:String(shot.text || ''), ...(sendImage ? { image: shot.image } : {}), width:Math.max(1, Math.round(Number(naturalWidth) || width)), height:Math.max(1, Math.round(Number(naturalHeight) || height)), elements, refs, tabs, contexts:extra, memory: run.memory || undefined, stalled:run.stalled, automatic:run.mode === 'autopilot', correction: run.correction || undefined };
   // Serialised once and sent verbatim, so the byte count below is the payload the Worker really gets.
   const payload = JSON.stringify(body);
   run.timing = { at: Date.now(), round: run.steps.length + 1, goal: run.goal.slice(0, 80), speed, refs: refs.length, image: sendImage, bytes: new TextEncoder().encode(payload).length, observeMs, actionMs: 0, actions: 0, settle: settleFor() };

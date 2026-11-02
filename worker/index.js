@@ -616,7 +616,17 @@ export default {
         // That is most of the prompt, so it is most of the wait.
         const speed = speedOf(input.speed);
         const imageOk = input.image === undefined || (typeof input.image === 'string' && /^[A-Za-z0-9+/=]+$/.test(input.image));
-        if (typeof input.goal !== 'string' || !input.goal.trim() || input.goal.length > 4000 || typeof input.text !== 'string' || input.text.length > 40000 || !imageOk || !Number.isFinite(input.width) || !Number.isFinite(input.height) || input.width < 1 || input.height < 1 || !Array.isArray(input.steps) || input.steps.length > 40) return json({ error: 'Invalid workflow observation.' }, 400);
+        // The panel cannot see this body, so a bare "invalid" is a bug report with nothing in it. Name
+        // the fields instead, and keep the step cap in line with the panel's own 60-step limit.
+        const bad = [
+          typeof input.goal !== 'string' || !input.goal.trim() || input.goal.length > 4000 ? 'goal' : '',
+          typeof input.text !== 'string' || input.text.length > 40000 ? 'text' : '',
+          imageOk ? '' : 'image',
+          Number.isFinite(input.width) && input.width >= 1 ? '' : 'width',
+          Number.isFinite(input.height) && input.height >= 1 ? '' : 'height',
+          Array.isArray(input.steps) && input.steps.length <= 60 ? '' : 'steps'
+        ].filter(Boolean);
+        if (bad.length) return json({ error: `Invalid workflow observation: ${bad.join(', ')}.` }, 400);
         const page = webUrl(input.url);
         if (!page) return json({ error: 'Unsupported page URL.' }, 400);
         const todos = Array.isArray(input.todos) ? input.todos.slice(0, 8).map((todo, index) => ({ id: clip(todo?.id, 40) || String(index + 1), title: clip(todo?.title, 160), done: todo?.done === true })).filter(todo => todo.title) : [];
