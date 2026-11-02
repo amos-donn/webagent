@@ -44,6 +44,17 @@ test('slices are joined into readable prose without empty paragraphs', () => {
   assert.equal(Audio.joinParts(['  ', '\n']), '', 'a silent slice leaves no gap behind');
 });
 
+test('a slice is cut at the quietest point near its end, not at a fixed boundary', () => {
+  const rate = 16000;
+  const samples = new Float32Array(rate * 10);
+  for (let i = 0; i < samples.length; i++) samples[i] = Math.sin(i / 8) * 0.4;
+  for (let i = rate * 8; i < rate * 8 + rate * 0.2; i++) samples[i] = 0;
+  assert.equal(Audio.quietCut(samples, rate), rate * 8, 'the cut lands on the pause');
+  assert.equal(Audio.quietCut(new Float32Array(0), rate), -1, 'nothing to cut');
+  const flat = new Float32Array(rate * 10).fill(0.2);
+  assert.equal(Audio.quietCut(flat, rate), Math.floor(rate * 10 * 0.7), 'flat audio cuts at the earliest allowed frame');
+});
+
 test('the line for a video time is the one covering it, or the last one before it', () => {
   const lines = [{ from: 0, to: 10 }, { from: 10, to: 20 }, { from: 32, to: 42 }];
   assert.equal(Audio.activeIndex(lines, 0), 0);

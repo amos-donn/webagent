@@ -881,32 +881,48 @@ async function captureMediaAudio(session) {
   const processor = context.createScriptProcessor(4096, 1, 1);
   const mute = context.createGain();
   mute.gain.value = 0;
-  const chunk = new Float32Array(audio.RATE * audio.SLICE);
-  let filled = 0, part = 0, samples = 0, stopped = false, from = 0;
+  const chunk = new Float32Array(audio.RATE * (audio.SLICE + 3));
+  let filled = 0, part = 0, samples = 0, stopped = false, runStart = 0, runSamples = 0;
   const duration = Number(media.duration) || 0;
-  const flush = () => {
-    if (!filled) return;
+  // Rendered seconds and media seconds differ once the playback speed is not 1, so the media time of a
+  // sample is measured against the element instead of assumed from the sample count.
+  const mediaTime = index => {
+    const span = (Number(media.currentTime) || 0) - runStart;
+    const rendered = runSamples / audio.RATE;
+    const per = rendered > 0.3 && span > 0 ? span / rendered : 1;
+    return runStart + (index / audio.RATE) * per;
+  };
+  const flush = (cut = filled, restart = false) => {
+    if (stopped || !filled) return;
+    const index = Math.max(1, Math.min(Math.round(cut), filled));
+    const to = restart ? (Number(media.currentTime) || 0) : mediaTime(index);
+    const bytes = audio.wavBytes(chunk.subarray(0, index), audio.RATE);
     part += 1;
-    const bytes = audio.wavBytes(chunk.subarray(0, filled), audio.RATE);
-    // The slice carries the media time it covers, taken from the element itself: a count of captured
-    // seconds drifts the moment the video is paused, seeked or played at another speed.
     send({
       event: 'chunk', part, audio: audio.base64(bytes), mimeType: 'audio/wav', seconds: Math.round(samples / audio.RATE),
-      from: Math.round(from * 100) / 100, to: Math.round((Number(media.currentTime) || 0) * 100) / 100
+      from: Math.round(runStart * 100) / 100, to: Math.round(to * 100) / 100
     });
-    filled = 0;
+    // The samples after the cut are not thrown away: they start the next slice, which is what lets a
+    // cut sit on a pause instead of at a fixed ten seconds.
+    chunk.copyWithin(0, index, filled);
+    filled -= index;
+    runSamples = Math.max(0, runSamples - index);
+    runStart = to;
+    if (!filled) { runSamples = 0; runStart = Number(media.currentTime) || 0; }
   };
   const onAudio = event => {
     if (stopped) return;
     // A paused video produces silence, and silence is a wasted request: nothing is collected until it
     // plays again.
     if (media.paused || media.ended) return;
-    if (!filled) from = Number(media.currentTime) || 0;
+    if (!filled) { runStart = Number(media.currentTime) || 0; runSamples = 0; }
     const input = event.inputBuffer.getChannelData(0);
-    for (let i = 0; i < input.length; i++) {
-      chunk[filled++] = input[i];
-      samples += 1;
-      if (filled === chunk.length) { flush(); break; }
+    for (let i = 0; i < input.length; i++) chunk[filled++] = input[i];
+    samples += input.length;
+    runSamples += input.length;
+    if (filled >= audio.RATE * audio.SLICE) {
+      const cut = audio.quietCut ? audio.quietCut(chunk.subarray(0, filled), audio.RATE, 0.7, 1) : -1;
+      flush(cut > 0 ? cut : Math.min(filled, audio.RATE * (audio.SLICE + 2)));
     }
   };
   const finish = reason => {
@@ -915,6 +931,9 @@ async function captureMediaAudio(session) {
     clearInterval(ticker);
     flush();
     media.removeEventListener?.('ended', onEnded);
+    media.removeEventListener?.('pause', onCut);
+    media.removeEventListener?.('seeked', onCut);
+    media.removeEventListener?.('ratechange', onCut);
     try { processor.disconnect(); source.disconnect(); mute.disconnect(); context.close(); } catch { /* already closed */ }
     send({ event: 'done', reason, seconds: Math.round(samples / audio.RATE), parts: part });
     delete window.__mezzeCapture;
@@ -925,6 +944,12 @@ async function captureMediaAudio(session) {
   processor.connect(mute);
   mute.connect(context.destination);
   media.addEventListener('ended', onEnded);
+  // A pause, a seek or a speed change ends the line where it is rather than smearing media time across
+  // audio that was never rendered.
+  const onCut = () => flush(filled, true);
+  media.addEventListener('pause', onCut);
+  media.addEventListener('seeked', onCut);
+  media.addEventListener('ratechange', onCut);
   const ticker = setInterval(() => send({ event: 'progress', seconds: Math.round(samples / audio.RATE), duration }), 5000);
   window.__mezzeCapture = { session, duration, paused: !!media.paused, stop: () => finish('stopped') };
   send({ event: 'start', duration, title: document.title, url: location.href });

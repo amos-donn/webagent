@@ -636,8 +636,8 @@ function renderHistory() {
     row.append(button, drop); list.append(row);
   }
 }
-function download(name, text) {
-  const blob = new Blob([text], { type: 'text/markdown' });
+function download(name, text, type = 'text/markdown') {
+  const blob = new Blob([text], { type });
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
   link.href = url; link.download = name;
@@ -675,8 +675,7 @@ function stop() {
   // agent is the one transcribing both have to stop: the capture settles the step it is waiting on.
   if (transcribeRun) stopTranscribe();
   const running = workflow;
-  rememberSteps(running);
-  flushTiming(running);
+  if (running) { rememberSteps(running); flushTiming(running); }
   // Every ending funnels through here: report, halt, stop button, step limit. The report path closes
   // the task first, so this only fires for the others.
   const ended = running ? finishTask(running, 'stopped') : null;
@@ -1259,7 +1258,7 @@ function deliverTranscript(result) {
   const words = result?.words || (text ? text.split(/\s+/).length : 0);
   if (!text) { notify(result?.error || 'No speech was found in that audio.', true); return; }
   pushMessage('assistant', text);
-  download(`mezze-transcript-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.txt`, text);
+  download(`mezze-transcript-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.txt`, text, 'text/plain');
   if (result?.error) notify(`Stopped early (${result.error}) — ${words} word${words === 1 ? '' : 's'} saved.`, true);
   else if (result?.partial) notify(`Stopped — ${words} word${words === 1 ? '' : 's'} saved.`);
   else notify(`Transcript ready — ${words} word${words === 1 ? '' : 's'}, saved as a text file.`);

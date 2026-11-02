@@ -56,6 +56,31 @@
     return all[0] || null;
   }
 
+  // Where the person put it, for as long as this page is open: a transcript you have to re-drag on every
+  // transcription is worse than one that stays put.
+  const PLACE_KEY = 'mezze:island';
+  function savePlace() {
+    if (!state.island) return;
+    try {
+      const rect = state.island.getBoundingClientRect();
+      sessionStorage.setItem(PLACE_KEY, JSON.stringify({ left: Math.round(rect.left), top: Math.round(rect.top), width: Math.round(rect.width), height: Math.round(rect.height) }));
+    } catch { /* storage full or blocked */ }
+  }
+  function restorePlace() {
+    if (!state.island) return;
+    try {
+      const saved = JSON.parse(sessionStorage.getItem(PLACE_KEY) || 'null');
+      if (!saved) return;
+      if (saved.width > 200) state.island.style.width = saved.width + 'px';
+      if (saved.height > 140) state.island.style.height = saved.height + 'px';
+      if (Number.isFinite(saved.left) && Number.isFinite(saved.top)) {
+        state.island.style.right = 'auto';
+        state.island.style.left = Math.max(0, Math.min(saved.left, window.innerWidth - 90)) + 'px';
+        state.island.style.top = Math.max(0, Math.min(saved.top, window.innerHeight - 60)) + 'px';
+      }
+    } catch { /* ignore a broken record */ }
+  }
+
   function build() {
     if (state.island?.isConnected) return;
     const host = document.createElement('div');
@@ -88,6 +113,8 @@
     </footer>`;
     root.append(island);
     document.documentElement.append(host);
+    restorePlace();
+    if (typeof ResizeObserver === 'function') new ResizeObserver(() => savePlace()).observe(island);
 
     state.host = host;
     state.root = root;
@@ -150,6 +177,7 @@
       const up = () => {
         window.removeEventListener('pointermove', move);
         window.removeEventListener('pointerup', up);
+        savePlace();
       };
       window.addEventListener('pointermove', move);
       window.addEventListener('pointerup', up);
@@ -157,7 +185,11 @@
     });
 
     island.addEventListener('keydown', event => {
-      if (event.key === 'Escape' && island !== document.fullscreenElement && !state.pip) destroy();
+      if (event.key === 'Escape' && island !== document.fullscreenElement && !state.pip) { destroy(); return; }
+      if (event.target?.tagName === 'SELECT') return;
+      if (event.key === ' ') { event.preventDefault(); if (bind()) { if (state.media.paused) state.media.play().catch(() => {}); else state.media.pause(); tick(); } }
+      else if (event.key === 'ArrowLeft') { event.preventDefault(); seekBy(-5); }
+      else if (event.key === 'ArrowRight') { event.preventDefault(); seekBy(5); }
     });
   }
 
@@ -218,6 +250,13 @@
       return;
     }
     state.lines.forEach((line, index) => state.body.append(lineNode(line, index)));
+    status();
+  }
+
+  function status() {
+    const hint = state.island?.querySelector('.hint');
+    if (!hint) return;
+    hint.textContent = state.lines.length ? `${state.lines.length} line${state.lines.length === 1 ? '' : 's'}` : 'click a line to jump';
   }
 
   function highlight(index) {
@@ -302,6 +341,7 @@
     else {
       if (state.body.querySelector('.empty')) state.body.textContent = '';
       state.body.append(lineNode(state.lines[state.lines.length - 1], state.lines.length - 1));
+      status();
       tick();
     }
     return true;

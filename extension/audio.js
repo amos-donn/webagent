@@ -87,11 +87,29 @@
   // 1x is not the only speed a person reads at, so the island offers the usual set.
   const RATES = [0.5, 0.75, 1, 1.25, 1.5, 2];
 
+  // Speech rarely stops exactly on a ten-second boundary, so a slice is cut at the quietest point near
+  // the end of the window: a pause between words rather than the middle of one.
+  function quietCut(samples, rate = RATE, earliest = 0.7, latest = 1) {
+    const length = samples?.length || 0;
+    if (!length) return -1;
+    const frame = Math.max(1, Math.round(rate * 0.05));
+    const from = Math.max(0, Math.floor(length * earliest));
+    const to = Math.min(length, Math.floor(length * latest));
+    let best = -1, softest = Infinity;
+    for (let start = from; start + frame <= to; start += frame) {
+      let power = 0;
+      for (let i = 0; i < frame; i++) { const value = samples[start + i] || 0; power += value * value; }
+      power /= frame;
+      if (power < softest) { softest = power; best = start; }
+    }
+    return best;
+  }
+
   const stamp = seconds => {
     const value = Number(seconds);
     const total = Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0;
     return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`;
   };
 
-  return { RATE, SLICE, RATES, toInt16, wavBytes, base64, joinParts, stamp, activeIndex };
+  return { RATE, SLICE, RATES, toInt16, wavBytes, base64, joinParts, stamp, activeIndex, quietCut };
 });
