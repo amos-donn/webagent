@@ -1199,7 +1199,7 @@ async function openScript() {
     return;
   }
   const saved = scriptFor(tab.id);
-  await send('player-open', { tabId: tab.id, title: saved?.title || tab.title || '', lines: saved?.lines || [] });
+  await send('player-open', { tabId: tab.id, title: saved?.title || tab.title || '', lines: saved?.lines || [], live: !!transcribeRun && transcribeRun.tabId === tab.id });
   scriptTab = tab.id;
   notify(saved?.lines?.length
     ? 'Script mode is on — the transcript follows the video.'
@@ -1238,7 +1238,7 @@ async function transcribePage(url = null, mode = 'command', forced = null) {
   run.url = String(out.url || tab.url || '');
   // Script mode opens with the capture: watching the lines arrive is the point of it.
   scriptTab = tab.id;
-  await send('player-open', { tabId: tab.id, title: run.title, lines: run.lines }).catch(() => {});
+  await send('player-open', { tabId: tab.id, title: run.title, lines: run.lines, live: true }).catch(() => {});
   if (mode === 'command') transcribeUi(true);
   currentAction('Recording the audio from this page');
   renderTranscribe();
@@ -1329,6 +1329,7 @@ async function finishTranscribe() {
   transcribeRun = null;
   if (run.mode === 'command') transcribeUi(false);
   run.settle?.({ text, words: text ? text.split(/\s+/).length : 0, seconds: run.seconds, parts: run.parts });
+  send('player-idle', { tabId: run.tabId }).catch(() => {});
 }
 
 async function stopTranscribe() {
@@ -1338,6 +1339,7 @@ async function stopTranscribe() {
   await send('capture-stop', { tabId: run.tabId, session: run.session }).catch(() => {});
   if (run.mode === 'command') transcribeUi(false);
   run.settle?.({ text: MezzeAudio.joinParts(run.text), partial: true, error: run.error, seconds: run.seconds, parts: run.parts });
+  send('player-idle', { tabId: run.tabId }).catch(() => {});
 }
 
 const COMMANDS = [
@@ -1767,6 +1769,76 @@ async function testConnection() {
 function openHistory() { renderHistory(); if (!$('history-dialog').open) $('history-dialog').showModal(); }
 function openSaw() { if (!lastShot) { notify('No screenshot yet — run a task first.', true); return; } $('saw-image').src = lastShot; if (!$('saw-dialog').open) $('saw-dialog').showModal(); }
 function hideSuggest() { $('suggest').hidden = true; $('suggest').textContent = ''; }
+
+// A slash token is resolved the moment it is typed, so the composer can show what Enter will do. A
+// prefix is enough when it is unambiguous (/tr is /transcribe), which is the point of the chip: you can
+// see what was understood before it is sent.
+function slashToken(name) {
+  const token = String(name || '').toLowerCase().replace(/^\/+/, '');
+  if (!token) return null;
+  const slug = value => ('/' + value).toLowerCase().replace(/[^a-z0-9/]+/g, '-');
+  const exact = COMMANDS.find(command => command.cmd.slice(1).toLowerCase() === token);
+  const near = exact ? [exact] : COMMANDS.filter(command => command.cmd.slice(1).toLowerCase().startsWith(token));
+  if (near.length === 1) return { kind: 'command', label: near[0].cmd, hint: near[0].hint, command: near[0] };
+  const saved = skills.find(skill => slug(skill.name) === '/' + token) || skills.find(skill => slug(skill.name).slice(1).startsWith(token));
+  if (saved) return { kind: 'skill', label: slug(saved.name), hint: saved.description || 'Run a saved skill', skill: saved };
+  const builtin = BUILTIN_SKILLS.find(skill => slug(skill.name) === '/' + token) || BUILTIN_SKILLS.find(skill => slug(skill.name).slice(1).startsWith(token));
+  if (builtin) return { kind: 'builtin', label: slug(builtin.name), hint: builtin.description, skill: builtin };
+  return null;
+}
+
+function runResolved(resolved, rest = '') {
+  if (!resolved) return false;
+  $('goal').value = rest;
+  grow();
+  renderChips();
+  hideSuggest();
+  if (resolved.kind === 'command') {
+    resolved.command.run();
+    if (rest) notify('Left the rest in the box: no command takes an argument yet.', false);
+    return true;
+  }
+  if (resolved.kind === 'skill') {
+    startWorkflow(rest || resolved.skill.prompt || (resolved.skill.steps || []).join(' → '), resolved.skill)
+      .catch(e => notify(e.message || 'Could not run that skill.', true));
+    return true;
+  }
+  startWorkflow(rest || resolved.skill.defaultGoal || 'Summarize this page', resolved.skill)
+    .catch(e => notify(e.message || 'Could not run that skill.', true));
+  return true;
+}
+
+function renderChips() {
+  const box = $('command-chips');
+  if (!box) return;
+  const tokens = [...$('goal').value.matchAll(/(^|\s)\/([a-z][a-z0-9-]*)/gi)].map(match => ({ name: match[2], leading: match.index === 0 }));
+  box.textContent = '';
+  if (!tokens.length) { box.hidden = true; return; }
+  for (const token of tokens) {
+    const resolved = slashToken(token.name);
+    const chip = document.createElement('button');
+    chip.type = 'button';
+    chip.className = 'command-chip' + (resolved ? '' : ' unknown');
+    const label = document.createElement('strong');
+    label.textContent = resolved ? resolved.label : `/${token.name}`;
+    const hint = document.createElement('span');
+    hint.textContent = resolved ? resolved.hint : 'not a command — sent as text';
+    chip.append(label, hint);
+    if (resolved && token.leading) {
+      const enter = document.createElement('span');
+      enter.className = 'enter';
+      enter.textContent = '↵';
+      chip.append(enter);
+    }
+    chip.title = resolved
+      ? `${resolved.hint}${token.leading ? ' — Enter runs this' : ' — click to run it'}`
+      : 'This is not a command, so it will be sent to the agent as text.';
+    if (resolved) chip.addEventListener('click', () => runResolved(resolved, ''));
+    else chip.addEventListener('click', () => notify('That is not a command. Commands start with / and resolve as you type.', true));
+    box.append(chip);
+  }
+  box.hidden = false;
+}
 function renderSuggest() {
   const value = $('goal').value;
   const box = $('suggest');
@@ -1796,12 +1868,17 @@ $('composer').addEventListener('submit', async event => {
   if (rec) { notify('Save or cancel the recording first.', true); return; }
   const goal = $('goal').value.trim();
   if (!goal) return;
+  // Typing a command and pressing Enter used to send the slash command to the model as a goal. A
+  // leading token that resolves runs the command instead, and anything after it stays in the box.
+  const leading = goal.match(/^\/([a-z][a-z0-9-]*)\s*([\s\S]*)$/i);
+  const resolved = leading ? slashToken(leading[1]) : null;
+  if (resolved) { runResolved(resolved, leading[2].trim()); return; }
   if (goal.length > 4000) { notify('Keep your task under 4,000 characters.', true); return; }
   hideSuggest();
   try { await startWorkflow(goal); } catch (e) { notify(e.message || 'Something went wrong.', true); }
 });
 $('goal').addEventListener('keydown', event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); $('composer').requestSubmit(); } });
-$('goal').addEventListener('input', () => { grow(); renderSuggest(); });
+$('goal').addEventListener('input', () => { grow(); renderSuggest(); renderChips(); });
 $('goal').addEventListener('blur', () => setTimeout(hideSuggest, 150));
 $('new-chat').addEventListener('click', () => { newChat().catch(e => notify(e.message || 'Could not start a chat.', true)); });
 $('history-btn').addEventListener('click', openHistory);

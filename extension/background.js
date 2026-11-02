@@ -977,6 +977,11 @@ function closePlayer() {
   window.MezzeScript.close();
   return { open: true };
 }
+function idlePlayer() {
+  if (!window.MezzeScript) return { open: false };
+  window.MezzeScript.idle();
+  return { open: true };
+}
 // The session lives in session storage rather than a global, so it survives a service worker restart
 // and every navigation re-arms the recorder on the new document.
 async function armRecorder(tabId) {
@@ -1278,7 +1283,7 @@ async function handle(message) {
     const tab = await getTab(message.tabId);
     if (!permitted(tab.url)) throw new Error('Script mode needs an HTTPS page (or a local development page). Chrome internal pages are blocked.');
     await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['audio.js', 'player.js'] });
-    const [result] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: openPlayer, args: [{ title: String(message.title || ''), lines: Array.isArray(message.lines) ? message.lines.slice(-400) : [] }] });
+    const [result] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: openPlayer, args: [{ title: String(message.title || ''), lines: Array.isArray(message.lines) ? message.lines.slice(-400) : [], live: message.live === true }] });
     return result?.result || { open: false };
   }
   if (message.type === 'player-line') {
@@ -1294,6 +1299,10 @@ async function handle(message) {
   if (message.type === 'player-close') {
     await chrome.scripting.executeScript({ target: { tabId: message.tabId }, func: closePlayer }).catch(() => {});
     return { closed: true };
+  }
+  if (message.type === 'player-idle') {
+    await chrome.scripting.executeScript({ target: { tabId: message.tabId }, func: idlePlayer }).catch(() => {});
+    return { idle: true };
   }
   // The panel receives these directly from the page; answering here only stops the content script
   // from seeing "Unknown action" as a rejection.

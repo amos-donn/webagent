@@ -38,6 +38,11 @@
     border: 1px solid rgba(120,120,130,.35); cursor: pointer; }
   .hint { flex: 1; text-align: right; font-size: 10px; opacity: .45; }
   .empty { padding: 16px 12px; opacity: .6; font-size: 12px; }
+  .skeleton { height: 13px; margin: 9px 8px; border-radius: 7px; background: linear-gradient(90deg, rgba(120,120,130,.14), rgba(120,120,130,.3), rgba(120,120,130,.14)); background-size: 200% 100%; animation: shimmer 1.5s linear infinite; }
+  .skeleton.short { width: 58% }
+  .skeleton.long { width: 90% }
+  @keyframes shimmer { from { background-position: 200% 0 } to { background-position: -200% 0 } }
+  @media (prefers-reduced-motion: reduce) { .skeleton { animation: none } }
   #island:fullscreen { inset: 0; width: auto; height: auto; min-width: 0; min-height: 0; border-radius: 0; resize: none; }
   #island:fullscreen .line { font-size: 15px; padding: 8px 12px; }
   #island[pip] { position: static; inset: auto; width: 100%; height: 100%; min-width: 0; min-height: 0; border: 0; border-radius: 0; box-shadow: none; resize: none; }
@@ -47,7 +52,7 @@
 
   const audio = () => window.MezzeAudio || null;
   const stamp = seconds => (audio()?.stamp ? audio().stamp(seconds) : `${Math.floor((Number(seconds) || 0) / 60)}:${String(Math.round((Number(seconds) || 0) % 60)).padStart(2, '0')}`);
-  const state = { host: null, root: null, island: null, body: null, media: null, lines: [], title: '', idx: -1, raf: 0, scrolled: 0, rate: 1, pip: null };
+  const state = { host: null, root: null, island: null, body: null, media: null, lines: [], title: '', idx: -1, raf: 0, scrolled: 0, rate: 1, pip: null, live: false };
 
   // The same rule the capture uses: the page's largest media element with a real source.
   function mediaElement() {
@@ -242,6 +247,16 @@
     if (!state.body) return;
     state.body.textContent = '';
     state.idx = -1;
+    if (!state.lines.length && state.live) {
+      // Nothing to read yet, so the shape of the answer is shown rather than an empty box.
+      for (const width of ['long', 'short', 'long', 'short', 'long']) {
+        const row = document.createElement('div');
+        row.className = `skeleton ${width}`;
+        state.body.append(row);
+      }
+      status();
+      return;
+    }
     if (!state.lines.length) {
       const empty = document.createElement('p');
       empty.className = 'empty';
@@ -250,13 +265,14 @@
       return;
     }
     state.lines.forEach((line, index) => state.body.append(lineNode(line, index)));
+    if (state.live) { const tail = document.createElement('div'); tail.className = 'skeleton short'; state.body.append(tail); }
     status();
   }
 
   function status() {
     const hint = state.island?.querySelector('.hint');
     if (!hint) return;
-    hint.textContent = state.lines.length ? `${state.lines.length} line${state.lines.length === 1 ? '' : 's'}` : 'click a line to jump';
+    hint.textContent = state.lines.length ? `${state.lines.length} line${state.lines.length === 1 ? '' : 's'}${state.live ? ' · live' : ''}` : (state.live ? 'transcribing' : 'click a line to jump');
   }
 
   function highlight(index) {
@@ -317,12 +333,20 @@
     try { pip?.close(); } catch { /* already gone */ }
   }
 
+  // The capture ended: the skeletons go, and an empty transcript says so instead of shimmering forever.
+  function idle() {
+    state.live = false;
+    if (state.island?.isConnected) render();
+    return true;
+  }
+
   function open(input = {}) {
     const incoming = Array.isArray(input.lines) ? input.lines : [];
     state.lines = incoming
       .filter(item => item && typeof item.text === 'string' && item.text.trim())
       .map(item => ({ from: Number(item.from) || 0, to: Number(item.to), text: item.text.trim() }));
     state.title = String(input.title || state.title || 'Transcript');
+    state.live = input.live === true;
     build();
     state.island.querySelector('.title').textContent = state.title;
     state.island.querySelector('.title').title = state.title;
@@ -338,8 +362,8 @@
     if (!input || typeof input.text !== 'string' || !input.text.trim()) return false;
     state.lines.push({ from: Number(input.from) || 0, to: Number(input.to), text: input.text.trim() });
     if (!state.island?.isConnected) open({ title: state.title, lines: state.lines });
+    else if (state.body.querySelector('.empty, .skeleton')) render();
     else {
-      if (state.body.querySelector('.empty')) state.body.textContent = '';
       state.body.append(lineNode(state.lines[state.lines.length - 1], state.lines.length - 1));
       status();
       tick();
@@ -360,5 +384,5 @@
     state.idx = -1;
   }
 
-  window.MezzeScript = { open, line, close: destroy, pip: togglePip, lines: () => state.lines.slice(), state };
+  window.MezzeScript = { open, line, idle, close: destroy, pip: togglePip, lines: () => state.lines.slice(), state };
 })();
