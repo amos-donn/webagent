@@ -666,3 +666,18 @@ test('an invalid observation names the field that failed', async () => {
     assert.equal(mock.calls.length, 0, 'a rejected body never reaches the model');
   } finally { mock.restore(); }
 });
+
+test('the final report speaks as the agent, not about it', async () => {
+  const reply = 'I placed the order and the confirmation page shows #4417. The card was already saved, so there was nothing else to pay with.';
+  const mock = scripted([{ verdict:'passed', headline:'Order placed', reply, did:['Clicked Buy'], failed:[], blocked:[], needsWork:false, summary:'Placed the order.' }]);
+  try {
+    const response = await worker.fetch(request({ goal:'Buy the desk', claim:'Bought it', url:'https://example.com/', text:'Order #4417 confirmed', steps:[{ type:'click', description:'Buy', ok:true }] }, '/review'), { DB:db, GEMINI_API_KEY:'test-key' });
+    assert.equal(response.status, 200);
+    const out = await response.json();
+    assert.equal(out.reply, reply);
+    assert.match(out.reply, /^I /, 'the report is written by the one who did the work');
+    const prompt = said(mock.calls[0]);
+    assert.match(prompt, /first person, two to four sentences/);
+    assert.match(prompt, /Never "the agent filled in the form"/);
+  } finally { mock.restore(); }
+});

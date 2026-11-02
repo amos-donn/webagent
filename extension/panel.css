@@ -95,9 +95,10 @@ button.plan-mark:hover { opacity: .75; }
 .message.report.failed .report-badge{background:#fbe6e2;color:#96443a}
 .message.report.unknown .report-badge{background:#eef1ec;color:#6d7d70}
 .message.report p{margin:7px 0 0;font-size:12.5px;line-height:1.55;color:#3f5747}
-.report-list{margin-top:11px}
-.report-list ul{margin:5px 0 0;padding-left:16px;display:flex;flex-direction:column;gap:4px}
-.report-list li{font-size:12px;line-height:1.45;color:#4e6554}
+.message.report .report-reply{font-size:13px;line-height:1.55;color:#37493b}
+/* Only what is still open is listed; the timeline above already says what happened. */
+.report-left{margin:9px 0 0;padding-left:15px;display:flex;flex-direction:column;gap:4px}
+.report-left li{font-size:12px;line-height:1.45;color:#5d6f61}
 .loading-icon{color:#4b7a5c}
 .loading-icon.spin .ph{animation:spin .9s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}

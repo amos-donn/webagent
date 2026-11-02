@@ -168,9 +168,13 @@ const VERDICTS = {
   unknown: { icon: 'info', label: 'Reported, not checked' }
 };
 function verdictOf(report) { return VERDICTS[report.verdict] ? report.verdict : 'unknown'; }
+// The end of a run is a reply, not a work order: the steps above already say what happened, so this
+// only says whether it worked, in the first person, and what is still open.
 function reportText(report) {
-  const section = (label, list) => Array.isArray(list) && list.length ? `\n${label}:\n${list.map(item => `- ${item}`).join('\n')}` : '';
-  return `${report.headline || VERDICTS[verdictOf(report)].label}\n\n${report.summary || ''}${section('What I did', report.did)}${section('What failed', report.failed)}${section('Could not do', report.blocked)}`.trim();
+  const reply = report.reply || report.summary || '';
+  const left = Array.isArray(report.blocked) && report.blocked.length ? `\n\n${report.blocked.map(item => `- ${item}`).join('\n')}` : '';
+  const text = `${reply}${left}`.trim();
+  return text || VERDICTS[verdictOf(report)].label;
 }
 function reportCard(report) {
   const verdict = verdictOf(report);
@@ -180,15 +184,15 @@ function reportCard(report) {
   const badge = document.createElement('span'); badge.className = 'report-badge'; setIcon(badge, VERDICTS[verdict].icon, 13);
   const title = document.createElement('strong'); title.textContent = report.headline || VERDICTS[verdict].label;
   head.append(badge, title); card.append(head);
-  if (report.summary) { const text = document.createElement('p'); text.textContent = report.summary; card.append(text); }
-  for (const [key, label] of [['did', 'What I did'], ['failed', 'What failed'], ['blocked', 'Could not do']]) {
-    const list = Array.isArray(report[key]) ? report[key] : [];
-    if (!list.length) continue;
-    const wrap = document.createElement('div'); wrap.className = 'report-list';
-    const heading = document.createElement('span'); heading.className = 'overline'; heading.textContent = label.toUpperCase();
-    const ul = document.createElement('ul');
-    for (const item of list) { const li = document.createElement('li'); li.textContent = item; ul.append(li); }
-    wrap.append(heading, ul); card.append(wrap);
+  const reply = document.createElement('p'); reply.className = 'report-reply';
+  reply.textContent = report.reply || report.summary || VERDICTS[verdict].label;
+  card.append(reply);
+  // What is still open, in the agent's own voice; a list of everything it did would just repeat the timeline.
+  const left = (Array.isArray(report.blocked) ? report.blocked : []).filter(Boolean);
+  if (left.length) {
+    const ul = document.createElement('ul'); ul.className = 'report-left';
+    for (const item of left) { const li = document.createElement('li'); li.textContent = item; ul.append(li); }
+    card.append(ul);
   }
   return card;
 }
@@ -212,11 +216,11 @@ async function finalCheck(run, claim, incomplete = []) {
   } catch (e) {
     if (workflow !== run) return;
     // A check that cannot run must not swallow the result: say so and report the claim as unverified.
-    report = { verdict: 'unknown', headline: 'Finished without a final check', did: [], failed: [], blocked: [], needsWork: false, summary: `${claim || 'The task finished.'} The final check could not run: ${e.message}` };
+    report = { verdict: 'unknown', headline: 'Finished without a final check', did: [], failed: [], blocked: [], needsWork: false, reply: `I finished the run, but I couldn't check it: ${e.message} Treat what is on the page as unverified.`, summary: `${claim || 'The task finished.'} The final check could not run: ${e.message}` };
   }
   if (workflow !== run) return;
   if (incomplete?.length) {
-    const titles = plan.filter(item => incomplete.includes(item.id)).map(item => `Could not finish: ${item.title}`);
+    const titles = plan.filter(item => incomplete.includes(item.id)).map(item => `I couldn't finish “${item.title}”.`);
     report = { ...report, verdict: report.verdict === 'passed' ? 'partial' : report.verdict, blocked: [...(report.blocked || []), ...titles] };
   }
   if (report.needsWork && (run.checks || 0) < 2 && run.mode !== 'manual') {
