@@ -73,6 +73,17 @@ button.plan-mark:hover { opacity: .75; }
 .tab-tag.agent{background:#eef4e9;color:#3b5a45}
 .message.current{display:flex;align-items:center;gap:6px;color:#4e6554}
 
+/* A step that is running: present tense, muted, with a turning icon. It leaves the timeline as a
+   past-tense entry once the action comes back. */
+#current-action{background:none;border:0;box-shadow:none;padding:2px 4px;margin-bottom:8px;color:#8b9a8d;font-size:12px;animation:none}
+#current-action .ph{color:#9aa79b;animation:spin .9s linear infinite}
+/* What the DOM round read, before any model call. */
+.inspect{display:flex;align-items:center;gap:5px;color:#93a295;font-size:11.5px;line-height:1.3;margin:0 4px 8px;animation:appear .3s ease both}
+.inspect .ph{flex:none;color:#a3b0a2}
+/* A tab a step created: clickable, because you may want to go and look at it yourself. */
+.tab-chip{display:inline-flex;align-items:center;max-width:100%;margin-top:7px;padding:3px 9px;border:1px solid #dfe8da;border-radius:999px;background:#f6f9f3;color:#3b5a45;font-size:11px;font-weight:700;text-decoration:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tab-chip:hover{background:#eef4e9;border-color:#cfe0c7}
+
 /* The report the run ends on: verdict, what happened, what did not. */
 .message.report{border-left:3px solid var(--green);padding:13px 14px 12px}
 .message.report.partial{border-left-color:#c08a2c}

@@ -122,14 +122,14 @@ function extractPageData() {
     const checked = el.checked === true || el.getAttribute('aria-checked') === 'true';
     elements.push({ role, name, x, y, off, state: disabled ? 'disabled' : checked ? 'checked' : '' });
   }
-  return { title: document.title, text: text.slice(0, 40000), elements };
+  return { title: document.title, text: text.slice(0, 40000), elements, width: innerWidth, height: innerHeight };
 }
 async function readPage(tabId) {
   try {
     const [{ result }] = await chrome.scripting.executeScript({ target: { tabId }, func: extractPageData });
     if (result && typeof result.text === 'string') return result;
   } catch { /* pages that block injection fall back to the simple reader */ }
-  const [{ result }] = await chrome.scripting.executeScript({ target: { tabId }, func: () => ({ title: document.title, text: (document.body?.innerText || '').slice(0, 40000), elements: [] }) });
+  const [{ result }] = await chrome.scripting.executeScript({ target: { tabId }, func: () => ({ title: document.title, text: (document.body?.innerText || '').slice(0, 40000), elements: [], width: innerWidth, height: innerHeight }) });
   return result;
 }
 async function shoot(tabId) {
@@ -772,13 +772,14 @@ async function handle(message) {
     if (!permitted(tab.url)) throw new Error('Select an HTTPS page (or a local development page). Chrome internal pages are not supported.');
     if (message.stayPut === false && !tab.discarded) { await chrome.tabs.update(tab.id, { active: true }); await sleep(350); }
     const fresh = await getTab(tab.id);
-    // Only one debugger session per tab at a time, so the screenshot and the tree are captured in series.
+    // DOM first. The tree and the element map are this round's ground truth, so the default
+    // observation captures no image at all: no paint, no encode, no image tokens. A screenshot is
+    // taken only when the panel asks for one (canvas, maps, icon-only controls the tree cannot name).
     const page = await readPage(fresh.id);
-    // A hidden tab can refuse a paint, and a missing screenshot is not a reason to drop the round.
-    const shot = await shoot(fresh.id).catch(() => ({}));
     const ax = await axSnapshot(fresh.id).catch(() => ({ refs: [], text: '' }));
     await saveRefs(fresh.id, fresh.url, ax.refs);
-    return { tabId: fresh.id, url: fresh.url, title: page.title, text: page.text, elements: page.elements, refs: ax.refs.map(({ backend, ...rest }) => rest), ...shot };
+    const shot = message.shot === true ? await shoot(fresh.id).catch(() => ({})) : {};
+    return { tabId: fresh.id, url: fresh.url, title: page.title, text: page.text, elements: page.elements, refs: ax.refs.map(({ backend, ...rest }) => rest), width: page.width || 0, height: page.height || 0, ...shot };
   }
   if (message.type === 'act') {
     const tab = message.tabId ? await getTab(message.tabId) : (await chrome.tabs.query({ active: true, currentWindow: true }))[0];

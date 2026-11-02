@@ -154,7 +154,7 @@ test('wrapped action JSON is unwrapped and out-of-frame clicks rejected', async 
   try {
     const response = await worker.fetch(request(observation), { DB:db, GEMINI_API_KEY:'test-key' });
     assert.equal(response.status, 400);
-    assert.match((await response.json()).error, /outside the screenshot/);
+    assert.match((await response.json()).error, /outside the viewport/);
   } finally { mock.restore(); }
 });
 
@@ -614,4 +614,18 @@ test('an explicit GEMINI_MODEL is obeyed even when it is unavailable', async () 
     assert.match((await response.json()).error, /gemini-9-nope/);
     assert.ok(urls.every(url => url.includes('gemini-9-nope')), 'no silent substitution of a configured model');
   } finally { globalThis.fetch = original; }
+});
+
+test('a round without an image is grounded in the tree and the viewport', async () => {
+  const mock = scripted([{ actions:[{ type:'click', ref:'e3', description:'Open the tickets page' }] }]);
+  try {
+    const response = await worker.fetch(request({ ...observation, image: undefined, text:'Tickets', elements:[{ role:'link', name:'Tickets', x:20, y:30 }], refs:[{ ref:'e3', role:'link', name:'Tickets' }] }), { DB:db, GEMINI_API_KEY:'test-key' });
+    assert.equal(response.status, 200);
+    const prompt = said(mock.calls[0]);
+    assert.equal(attached(mock.calls[0]), undefined, 'the default round must not carry an image');
+    assert.match(prompt, /No screenshot this round/);
+    assert.match(prompt, /GROUNDING IS DOM FIRST/);
+    assert.match(prompt, /INTERACTIVE ELEMENTS IN THE VIEWPORT/);
+    assert.match(prompt, /Coordinates are viewport pixels/);
+  } finally { mock.restore(); }
 });

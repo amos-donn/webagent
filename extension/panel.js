@@ -1,6 +1,22 @@
 const $ = id => document.getElementById(id);
 const ICONS = { think:'sparkle', click:'cursor-click', type:'keyboard', write:'sparkle', read:'book-open-text', scroll:'arrows-down-up', wait:'hourglass', navigate:'arrow-right', key:'key-return', switch:'arrow-right', open:'plus', gather:'book-open-text', close:'x' };
-const LABELS = { think:'Thinking through', click:'Clicking', type:'Typing', write:'Writing with Gemini', read:'Reading page', scroll:'Scrolling', wait:'Waiting', navigate:'Navigating', key:'Pressing key', switch:'Switching tabs', open:'Opening a new tab', gather:'Reading tabs', close:'Closing a tab' };
+// Two names per step: what it is doing while it runs, and what it did once it finished. The
+// timeline keeps the past tense because it is a record of work, not a spinner that vanished.
+const VERBS = {
+  think: ['Thinking', 'Thought'], click: ['Clicking', 'Clicked'], type: ['Typing', 'Typed'],
+  write: ['Writing with Gemini', 'Wrote'], read: ['Reading the page', 'Read the page'],
+  scroll: ['Scrolling', 'Scrolled'], wait: ['Waiting', 'Waited'],
+  navigate: ['Opening the page', 'Opened the page'], key: ['Pressing a key', 'Pressed a key'],
+  switch: ['Switching tabs', 'Switched tabs'], open: ['Opening a new page', 'Opened a new page'],
+  gather: ['Reading tabs', 'Read the tabs'], close: ['Closing the tab', 'Closed the tab'],
+  inspect: ['Looking at the page', 'Looked at the page']
+};
+const verb = (type, tense = 0) => (VERBS[type] || ['Working', 'Worked'])[tense];
+const LABELS = Object.fromEntries(Object.entries(VERBS).map(([type, names]) => [type, names[0]]));
+function activeLabel(action) {
+  const what = String(action.description || '').trim();
+  return `${verb(action.type)}${what ? `: ${what}` : ''}`;
+}
 const TAB_STEPS = new Set(['open', 'switch', 'gather', 'close']);const STEP_LIMIT = 60;
 const MAX_CHATS = 20;
 const MAX_MESSAGES = 400;
@@ -250,7 +266,7 @@ function renderMessage(message) {
     const details = document.createElement('details'); details.className = 'activity' + (message.failure ? ' failed' : '');
     const summary = document.createElement('summary');
     const badges = `${message.failure ? ' · failed' : message.changed === false ? ' · no visible change' : ''}${message.fallback ? ' · retried with a scripted click' : ''}`;
-    summary.append(phosphor(ICONS[message.type] || 'sparkle', 13), document.createTextNode(`  ${String(message.type || 'step').charAt(0).toUpperCase() + String(message.type || 'step').slice(1)}${message.elapsed ? ` · ${(message.elapsed / 1000).toFixed(1)}s` : ''}${badges}`));
+    summary.append(phosphor(ICONS[message.type] || 'sparkle', 13), document.createTextNode(`  ${verb(message.type, 1)}${message.elapsed ? ` · ${(message.elapsed / 1000).toFixed(1)}s` : ''}${badges}`));
     const thought = document.createElement('p'); thought.textContent = message.text || 'Action completed.';
     details.append(summary, thought);
     if (message.page) { const page = document.createElement('p'); page.className = 'page-url'; page.textContent = `Webpage: ${message.page}`; details.append(page); }
@@ -258,7 +274,19 @@ function renderMessage(message) {
     if (message.input) { const text = document.createElement('p'); text.textContent = `Text: ${message.input}${message.submit ? ' (then Enter)' : ''}`; details.append(text); }
     if (message.destination) { const dest = document.createElement('p'); dest.textContent = `Destination: ${message.destination}`; details.append(dest); }
     if (message.excerpt) { const excerpt = document.createElement('p'); excerpt.textContent = `Read: ${message.excerpt}`; details.append(excerpt); }
+    if (message.opened?.url) {
+      // A created tab is a thing you can go back to, so it gets a chip rather than a sentence.
+      const chip = document.createElement('a'); chip.className = 'tab-chip'; chip.href = message.opened.url; chip.target = '_blank'; chip.rel = 'noreferrer';
+      chip.textContent = message.opened.title || hostOf(message.opened.url); chip.title = message.opened.url;
+      details.append(chip);
+    }
     return details;
+  }
+  // What the DOM round actually saw, printed before any model call.
+  if (message.role === 'inspect') {
+    const line = document.createElement('div'); line.className = 'inspect';
+    line.append(phosphor('eye', 11), document.createTextNode(` ${message.text}`));
+    return line;
   }
   // A finished thought is flat text, not a card: the shimmer belongs to the wait, not the result.
   if (message.role === 'thought') {
@@ -407,11 +435,13 @@ function loading(label, icon = 'spinner-gap') {
   $('loading-icon').classList.toggle('spin', icon === 'spinner-gap' || icon === 'circle-notch');
   $('loading').hidden = false;
 }
+// One line for the step that is running right now. It says what is happening in the present tense
+// and disappears when the step finishes, where it becomes a past-tense entry in the timeline.
 function currentAction(label) {
   const existing = $('current-action');
   if (!label) { existing?.remove(); return; }
-  if (existing) existing.replaceChildren(phosphor('sparkle', 11), document.createTextNode(` ${label}`));
-  else { const row = document.createElement('div'); row.id = 'current-action'; row.className = 'message current'; row.replaceChildren(phosphor('sparkle', 11), document.createTextNode(` ${label}`)); $('steps').append(row); }
+  if (existing) existing.replaceChildren(phosphor('spinner-gap', 11), document.createTextNode(` ${label}`));
+  else { const row = document.createElement('div'); row.id = 'current-action'; row.className = 'message current'; row.replaceChildren(phosphor('spinner-gap', 11), document.createTextNode(` ${label}`)); $('steps').append(row); }
   $('current-action').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
 function recordActivity(action, url, result, elapsed, failure, meta = {}) {
@@ -420,6 +450,7 @@ function recordActivity(action, url, result, elapsed, failure, meta = {}) {
     role: 'activity', type: action.type, text: action.description || '',
     elapsed: elapsed || 0, failure: failure || '', changed: meta.changed, fallback: meta.fallback, page: url,
     input: action.type === 'type' ? action.text : undefined, submit: action.submit,
+    opened: meta.opened,
     destination: action.type === 'navigate' ? action.url : undefined,
     excerpt: action.type === 'read' ? String(result?.text || '').slice(0, 400) : undefined
   };
@@ -498,19 +529,44 @@ async function next(run, prefetched) {
     run.warned.push(tab.id);
     pushMessage('note', `Could not read ${shortTitle(tab)} as context — it may have been closed or asleep.`);
   }
-  const image = $('screenshot'); image.src = `data:image/jpeg;base64,${shot.image}`; await image.decode();
-  lastShot = `data:image/jpeg;base64,${shot.image}`;
-  $('saw-image').src = lastShot; $('saw-btn').hidden = false;
-  chrome.storage.local.set({ lastShot }).catch(() => {});
-  const scale = image.naturalWidth / shot.width;
+  let refs = Array.isArray(shot.refs) ? shot.refs : [];
+  // Vision is a fallback, not the default. A screenshot costs a paint, an encode, image tokens and a
+  // slower round; the tree alone is enough for almost every page, so one is captured only when the
+  // tree is too thin to act on, or when the model asked to see the page after working from the DOM.
+  if (run.wantShot || refs.length < 6) {
+    if (!shot.image) {
+      loading(`Looking at ${shortTitle(acting)}`, 'eye');
+      shot = { ...shot, ...(await timed(send('observe', { tabId: acting.id, stayPut, shot: true }), OBSERVE_TIMEOUT, `Looking at ${shortTitle(acting)} took too long.`)) };
+      if (workflow !== run) return;
+      refs = Array.isArray(shot.refs) ? shot.refs : [];
+    }
+    if (!run.looked) {
+      run.looked = true;
+      pushMessage('note', refs.length < 6 ? 'This page had almost no readable controls, so I looked at it as an image this round.' : 'I asked to see the page, so this round includes a screenshot.');
+    }
+  }
+  const width = shot.width || 1, height = shot.height || 1;
+  const image = $('screenshot');
+  let naturalWidth = width, naturalHeight = height;
+  if (shot.image) {
+    image.src = `data:image/jpeg;base64,${shot.image}`; await image.decode();
+    naturalWidth = image.naturalWidth || width; naturalHeight = image.naturalHeight || height;
+    lastShot = `data:image/jpeg;base64,${shot.image}`;
+    $('saw-image').src = lastShot; $('saw-btn').hidden = false;
+    chrome.storage.local.set({ lastShot }).catch(() => {});
+  }
+  const scale = naturalWidth / width;
   const elements = (shot.elements || []).map(el => ({ role: el.role, name: el.name, x: Math.round(el.x * scale), y: Math.round(el.y * scale), off: el.off, state: el.state }));
-  const refs = Array.isArray(shot.refs) ? shot.refs : [];
+  // The DOM line: what this round could read, printed before the model is asked anything.
+  if (run.lastFound !== refs.length) {
+    run.lastFound = refs.length;
+    pushMessage('inspect', `Found ${refs.length} accessible element${refs.length === 1 ? '' : 's'}`);
+  }
   const tabs = tabList(run).filter(({ tab }) => tab.supported).map(({ token, tab }) => ({ id: token, title: shortTitle(tab), url: tab.url, acting: tab.id === acting.id, context: run.contextIds.includes(tab.id), opened: (run.opened || []).includes(tab.id) }));
-  run.view = { tabId: shot.tabId, url: shot.url, width: shot.width, height: shot.height, naturalWidth: image.naturalWidth, naturalHeight: image.naturalHeight };
+  run.view = { tabId: shot.tabId, url: shot.url, width, height, naturalWidth, naturalHeight };
   const done = plan.filter(item => item.done).length;
   loading(plan.length ? `Thinking · ${done}/${plan.length} plan steps · action ${run.steps.length + 1}/${STEP_LIMIT}` : `Thinking about action ${run.steps.length + 1}`, 'sparkle');
-  // Vision is a fallback: it is only attached for thin trees or when the model asks for it.
-  const sendImage = run.wantShot || refs.length < 15;
+  const sendImage = !!shot.image;
   const started = performance.now();
   const { actions, action, completed, incomplete, memory, needScreenshot, ms } = await api('/agent', { goal:aimed(run), speed, intent:[run.goal, ...plan.map(item => item.title)].join('\n'), todos:plan, steps:run.steps, url:shot.url, title:shot.title, text:shot.text, ...(sendImage ? { image: shot.image } : {}), width:image.naturalWidth, height:image.naturalHeight, elements, refs, tabs, memory: run.memory || undefined, stalled:run.stalled, automatic:run.mode === 'autopilot', correction: run.correction || undefined, contexts:extra });  if (memory) run.memory = memory;
   run.correction = '';
@@ -618,6 +674,7 @@ async function actOnTabs(run, action) {
     const url = webTarget(action.url) || (action.query ? webTarget(`https://duckduckgo.com/?q=${encodeURIComponent(String(action.query).slice(0, 200))}`) : null);
     if (!url) throw new Error('That address is not an HTTPS page.');
     if ((run.opened || []).length >= 3) throw new Error('This task already opened three tabs. Use one of them, or focus a tab the user already has.');
+    currentAction(`Waiting for the new tab to load`);
     const tab = await chrome.tabs.create({ url, active: !stayPut });
     await waitForTab(tab.id);
     run.opened = [...(run.opened || []), tab.id];
@@ -625,7 +682,7 @@ async function actOnTabs(run, action) {
     send('group', { tabId: tab.id }).catch(() => {});
     run.allow = [...new Set([...run.allow, new URL(url).origin])];
     pushMessage('note', stayPut ? `Opened ${hostOf(url)} in a new tab.` : `Opened ${hostOf(url)} in a new tab and switched to it.`);
-    return { url, effect: { verified: true } };
+    return { url, title: tab.title || hostOf(url), effect: { verified: true } };
   }
   if (action.type === 'switch') {
     const tab = tabByToken(run, action.tab);
@@ -666,7 +723,7 @@ async function executeOne(run, current) {
   if (!current || workflow !== run) return 'stop';
   const action = current.action;
   loading(LABELS[action.type] || 'Working', ICONS[action.type] || 'sparkle');
-  currentAction(`Doing ${action.type.toUpperCase()}: ${action.description || ''}`);
+  currentAction(activeLabel(action));
   proposal = null;
   let result;
   try {
@@ -707,7 +764,7 @@ async function executeOne(run, current) {
   else run.stalled = (run.stalled || 0) + 1;
   const note = ['read', 'gather'].includes(action.type) && result?.text ? `page excerpt: ${String(result.text).slice(0, 1500)}` : '';
   run.steps.push({ type: action.type, description: action.description || '', ok: true, changed, page: current.url, note, code: result?.code || '', ref: action.ref, x: current.action.x, y: current.action.y, url: action.url, direction: action.direction, text: action.type === 'type' ? action.text : undefined });
-  recordActivity(action, result?.url || current.url, result, 0, null, { changed, fallback: !!result?.fallback });
+  recordActivity(action, result?.url || current.url, result, 0, null, { changed, fallback: !!result?.fallback, opened: action.type === 'open' ? { url: result?.url, title: result?.title } : undefined });
   currentAction(null);
   return 'ok';
 }
