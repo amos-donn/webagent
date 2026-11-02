@@ -20,6 +20,13 @@ let tabCache = [], actingTabId = null, contextIds = [];
 // There is no mode picker any more: every round runs on its own, and a risky-looking step is still
 // matched against the goal and announced in the timeline.
 let mode = 'autopilot', planMode = 'auto', lastShot = '', skills = [];
+// Speed moves the model and the pauses together: a light model answers in about a second, so a
+// 600 ms pause between actions is most of the wait. Careful is the old behaviour.
+let speed = 'fast', slowPages = false;
+const PACING = { fast: 120, balanced: 400, careful: 800 };
+const SETTLE_MS = { fast: 800, balanced: 2200, careful: 4000 };
+const pace = () => PACING[speed] || PACING.balanced;
+const settleFor = () => (slowPages ? 4000 : SETTLE_MS[speed] || SETTLE_MS.balanced);
 
 function notify(text, error = false) { $('notice').textContent = text; $('notice').classList.toggle('error', error); $('notice').hidden = false; }
 function baseUrl() { const url = new URL($('worker').value.trim()); if (url.username || url.password || url.search || url.hash || (url.protocol !== 'https:' && !(url.protocol === 'http:' && ['localhost','127.0.0.1'].includes(url.hostname)))) throw new Error('Use an HTTPS Worker URL or localhost.'); return url.origin + url.pathname.replace(/\/$/, ''); }
@@ -128,7 +135,7 @@ async function finalCheck(run, claim, incomplete = []) {
   if (workflow !== run) return;
   let report;
   try {
-    report = await api('/review', {
+    report = await api('/review', { speed,
       goal: run.goal, claim: claim || '', todos: plan, steps: run.steps,
       url: shot?.url || run.view?.url, title: shot?.title, text: shot?.text || '',
       ...(shot ? { image: shot.image, width: shot.width, height: shot.height } : {})
@@ -466,7 +473,7 @@ async function next(run, prefetched) {
   // Vision is a fallback: it is only attached for thin trees or when the model asks for it.
   const sendImage = run.wantShot || refs.length < 15;
   const started = performance.now();
-  const { actions, action, completed, incomplete, memory, needScreenshot, ms } = await api('/agent', { goal:aimed(run), intent:[run.goal, ...plan.map(item => item.title)].join('\n'), todos:plan, steps:run.steps, url:shot.url, title:shot.title, text:shot.text, ...(sendImage ? { image: shot.image } : {}), width:image.naturalWidth, height:image.naturalHeight, elements, refs, memory: run.memory || undefined, stalled:run.stalled, automatic:run.mode === 'autopilot', correction: run.correction || undefined, contexts:extra });
+  const { actions, action, completed, incomplete, memory, needScreenshot, ms } = await api('/agent', { goal:aimed(run), speed, intent:[run.goal, ...plan.map(item => item.title)].join('\n'), todos:plan, steps:run.steps, url:shot.url, title:shot.title, text:shot.text, ...(sendImage ? { image: shot.image } : {}), width:image.naturalWidth, height:image.naturalHeight, elements, refs, memory: run.memory || undefined, stalled:run.stalled, automatic:run.mode === 'autopilot', correction: run.correction || undefined, contexts:extra });
   if (memory) run.memory = memory;
   run.correction = '';
   if (needScreenshot && !run.wantShot) { run.wantShot = true; return next(run); }
@@ -504,24 +511,24 @@ async function runBatch(run) {
   while (run.queue.length && workflow === run) {
     const action = run.queue.shift();
     const outcome = await executeOne(run, showProposal(run, action, run.queue.length, true));
-    if (outcome === 'recover') { await sleep(300); if (workflow === run) await safeNext(run); return; }
+    if (outcome === 'recover') { await sleep(pace()); if (workflow === run) await safeNext(run); return; }
     if (outcome !== 'ok') {
       // Recover in place: re-observe and let the model pick a different route before giving up.
       if (outcome === 'failed' && run.mode !== 'manual' && (run.hardFails || 0) < 2) {
         run.hardFails = (run.hardFails || 0) + 1;
         pushMessage('note', 'That step kept failing, so I’ll look at the page again and try a different route.');
-        await sleep(700);
+        await sleep(pace() * 2);
         if (workflow === run) await safeNext(run);
         return;
       }
       halt(run, 'Stopped where the page would not accept the action. The task is back in the box to retry.');
       return;
     }
-    if (run.queue.length) { loading('Next queued action', '◌'); await sleep(220); }
+    if (run.queue.length) { loading('Next queued action', '◌'); await sleep(Math.round(pace() / 2)); }
   }
   if (workflow !== run) return;
   loading('Waiting for the page', '◌');
-  await sleep(600);
+  await sleep(pace());
   if (workflow !== run) return;
   await safeNext(run);
 }
@@ -532,7 +539,7 @@ async function safeNext(run) {
     if (run.mode !== 'manual' && (run.apiRetries || 0) < 2) {
       run.apiRetries = (run.apiRetries || 0) + 1;
       pushMessage('note', `${e.message} Retrying with a fresh look at the page.`);
-      await sleep(900);
+      await sleep(pace() * 2);
       if (workflow === run) return safeNext(run);
       return;
     }
@@ -576,7 +583,7 @@ async function executeOne(run, current) {
         pushMessage('note', `Extended this task to ${new URL(action.url).hostname}.`);
       }
     }
-    result = await send('act', { ...current, goal: run.goal, intent: [run.goal, ...plan.map(item => item.title)].join('\n'), allow: run.allow, automatic: run.mode === 'autopilot' });
+    result = await send('act', { ...current, settleMs: settleFor(), goal: run.goal, intent: [run.goal, ...plan.map(item => item.title)].join('\n'), allow: run.allow, automatic: run.mode === 'autopilot' });
   }
   catch (error) {
     if (workflow !== run) return 'stop';
@@ -775,14 +782,29 @@ $('stop').addEventListener('click', () => { stop(); notify('Workflow stopped. An
 $('worker').addEventListener('change', async () => { await chrome.storage.local.set({ worker: $('worker').value.trim().replace(/\/$/, '') }); });
 $('bridge-toggle').addEventListener('change', async () => { try { const out = await send('bridge', { on: $('bridge-toggle').checked }); notify(out.connected ? 'Bridge on. Start node bridge/server.mjs to accept MCP clients.' : 'Bridge off.'); } catch (e) { notify(e.message || 'Could not toggle the bridge.', true); } });
 $('pointer-toggle').addEventListener('change', async () => { await chrome.storage.local.set({ pointer: $('pointer-toggle').checked }); notify($('pointer-toggle').checked ? 'Pointer on: a purple cursor shows where the agent clicks.' : 'Pointer off.'); });
+$('speed').addEventListener('change', async () => {
+  const value = $('speed').value;
+  speed = Object.prototype.hasOwnProperty.call(PACING, value) ? value : 'fast';
+  await chrome.storage.local.set({ speed });
+  notify(`Speed: ${speed}. This applies from the next action.`);
+});
+$('slow-toggle').addEventListener('change', async () => {
+  slowPages = $('slow-toggle').checked;
+  await chrome.storage.local.set({ slowPages });
+  notify(slowPages ? 'Waiting up to four seconds for a slow menu before calling an action a failure.' : 'Deciding quickly. A slow menu may look like a failed click.');
+});
 chrome.runtime.onMessage.addListener(message => { if (message && message.type === 'pointerBlocked') notify('Pointer is on, but this page blocks the cursor overlay — the click still went ahead.', true); });
 
 (async () => {
-  const saved = await chrome.storage.local.get(['worker', 'chats', 'activeChat', 'planMode', 'lastShot', 'skills', 'bridge', 'pointer']);
+  const saved = await chrome.storage.local.get(['worker', 'chats', 'activeChat', 'planMode', 'lastShot', 'skills', 'bridge', 'pointer', 'speed', 'slowPages']);
   $('worker').value = saved.worker || 'https://webagent.amos-donn.workers.dev';
   skills = Array.isArray(saved.skills) ? saved.skills : [];
   $('bridge-toggle').checked = saved.bridge === true;
   $('pointer-toggle').checked = saved.pointer !== false;
+  speed = Object.prototype.hasOwnProperty.call(PACING, saved.speed) ? saved.speed : 'fast';
+  slowPages = saved.slowPages === true;
+  $('speed').value = speed;
+  $('slow-toggle').checked = slowPages;
   planMode = ['auto', 'always', 'never'].includes(saved.planMode) ? saved.planMode : 'auto';
   lastShot = saved.lastShot || '';
   $('saw-btn').hidden = !lastShot;

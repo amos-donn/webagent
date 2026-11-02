@@ -261,10 +261,14 @@ async function signature(tabId) { const state = await watched(tabId); return sta
 // reads that as a dead click. Wait for the page to go quiet instead: quiet plus a change is a finished
 // action, quiet plus no change is a real NO_EFFECT, and a busy page is given the time it needs.
 const SETTLE_MAX = 4000;
+// A fast run cannot spend four seconds per action waiting for a menu, so the panel sends a budget
+// with each action. The module keeps the current one rather than threading it through every call.
+let settleBudget = SETTLE_MAX;
 async function settle(tabId, before) {
+  const span = Math.min(Math.max(Number(settleBudget) || SETTLE_MAX, 400), SETTLE_MAX);
   let latest = before, lastMutations = -1, quiet = 0, changedAt = 0;
-  const deadline = Date.now() + SETTLE_MAX;
-  for (let attempt = 0; attempt < 20 && Date.now() < deadline; attempt++) {
+  const deadline = Date.now() + span;
+  for (let attempt = 0; attempt < 40 && Date.now() < deadline; attempt++) {
     await sleep(attempt < 2 ? 120 : 180);
     const state = await watched(tabId);
     // The tab was navigating or refused injection: the effect is unknown, not disproved.
@@ -649,6 +653,7 @@ async function guardAction(tabId, action, message) {
   return { notice: `“${clip(labels.join(' / ') || words[0] || action.type, 50)}” can be hard to undo, but it matches what you asked for — going ahead.` };
 }
 async function actOnTab(fresh, action, message) {
+  settleBudget = Number(message?.settleMs) || SETTLE_MAX;
   if (action.type === 'navigate') {
     const url = new URL(action.url);
     if (!permitted(url.href) || url.username || url.password) throw new Error('Only HTTPS or local URLs are allowed.');

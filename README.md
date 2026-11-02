@@ -16,7 +16,7 @@ The default Worker is `https://webagent.amos-donn.workers.dev`. Select a page, e
    - `GEMINI_API_KEY` — your Google AI Studio (Gemini API) key from [aistudio.google.com/apikey](https://aistudio.google.com/apikey). Store it as a Worker secret, not in the extension.
 
 
-   The Worker calls the Gemini API directly — `POST https://generativelanguage.googleapis.com/v1beta/models/<model>:generateContent` with `x-goog-api-key` — using `gemini-3.8-flash`, Google's most intelligent Flash model and the one built for long-horizon agents. Requests set `responseMimeType: "application/json"`, `temperature: 0`, and send the viewport screenshot as an `inlineData` image part. To change the model, add an ordinary (non-secret) variable `GEMINI_MODEL`: `gemini-4-argon` is the flagship reasoning model, `gemini-3.6-flash` the previous generation, `gemini-3.5-flash-lite` the cheapest. A leading `models/` prefix is accepted either way. The model must accept image input and JSON output; free-tier quotas are counted per project and per model.
+   The Worker calls the Gemini API directly — `POST https://generativelanguage.googleapis.com/v1beta/models/<model>:generateContent` with `x-goog-api-key` — using a model chosen by the **Speed** setting in the panel: `gemini-3.5-flash-lite` for **Fast** (the default, about a second per decision), `gemini-3.6-flash` for **Balanced** and `gemini-3.8-flash` for **Careful**. Requests set `responseMimeType: "application/json"`, `temperature: 0`, and send the viewport screenshot as an `inlineData` image part. To change the model, add an ordinary (non-secret) variable `GEMINI_MODEL`: `gemini-4-argon` is the flagship reasoning model, `gemini-3.6-flash` the previous generation, `gemini-3.5-flash-lite` the cheapest. A leading `models/` prefix is accepted either way. The model must accept image input and JSON output; free-tier quotas are counted per project and per model.
 4. In Workers Builds, use the repository root and deploy command `npx wrangler deploy`. The config sets `keep_vars` to preserve dashboard variables and secrets. Make sure the build has a supported Wrangler version and that `DB` is still bound to the intended database after deployment. Apply the migration before deploying this version. Your existing push-to-main build can deploy it once these changes are committed and pushed; this project does not push or deploy automatically on its own.
 5. Open `https://webagent.amos-donn.workers.dev/health` to check that the Worker responds, then test a simple workflow in Chrome.
 
@@ -55,6 +55,16 @@ When the model says the task is done, the run does not end there. The panel re-r
 If the check finds missing work that a browser action could still fix, that verdict is fed back as a correction and the agent goes back to the page, up to two extra rounds. When it finishes either way, the chat ends with a report card: the verdict, two or three sentences on what happened, then *What I did*, *What failed* and *Could not do* lists. A check that cannot run (rate limit, offline) is reported as unverified rather than pretending to pass, and unchecked plan items are listed under *Could not do*. The report is part of the chat, so it survives reloads and is included in `Export .md`.
 
 There is no approval-mode picker any more: every round's actions run, and a step that looks irreversible (paying, deleting, sending, submitting, sharing, uploading, or typing password/card-like text) is still matched against the goal and announced in the timeline instead of going ahead silently. No tab group is created: the star just marks the tab the agent acts in, and the eye button shows the exact screenshot the last decision was made from.
+
+## Speed
+
+Three settings decide how long a round takes, and all three are in **Settings**:
+
+- **Speed.** *Fast* (the default) asks `gemini-3.5-flash-lite`, uses short pauses between actions, and sends a smaller observation — 50 refs, 14,000 characters of page text, 4,000 per attached tab. *Balanced* uses `gemini-3.6-flash` with a medium observation. *Careful* is the old behaviour: `gemini-3.8-flash` with the full 220 refs and the whole page, which thinks for several seconds per decision.
+- **Wait for slow pages before deciding.** Off by default, so a click gets 0.8 s to change the page and the run moves on. On, an action waits until the page stops mutating, up to four seconds — worth it on sites whose menus open late, at the cost of time on a page that does nothing.
+- **Show pointer** and **Local bridge**, unchanged.
+
+The setting applies from the next action; a run already in flight keeps the speed it started with until the next round. A model that errors falls back to the next one down the chain rather than ending the run, and `GEMINI_MODEL`, when set, overrides the speed setting entirely.
 
 ## Accessibility refs, safety boundary, skills, evals and the MCP bridge
 

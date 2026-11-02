@@ -1,4 +1,9 @@
-const DEFAULT_MODEL = 'gemini-3.8-flash';
+// Speed picks the model as well as the pauses in the panel. A light model answers in about a
+// second; the bigger ones think for several, which is why fast is the default.
+const SPEED_MODELS = { fast: 'gemini-3.5-flash-lite', balanced: 'gemini-3.6-flash', careful: 'gemini-3.8-flash' };
+const DEFAULT_SPEED = 'fast';
+const DEFAULT_MODEL = SPEED_MODELS[DEFAULT_SPEED];
+const speedOf = value => (typeof value === 'string' && Object.prototype.hasOwnProperty.call(SPEED_MODELS, value) ? value : DEFAULT_SPEED);
 const GEMINI_ROOT = 'https://generativelanguage.googleapis.com/v1beta/models/';
 const ACTION_TYPES = ['think', 'click', 'type', 'write', 'read', 'scroll', 'wait', 'navigate', 'switch', 'key', 'fill', 'done'];
 const KEY_NAMES = ['Enter', 'Escape', 'Tab', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'PageUp', 'PageDown', 'Home', 'End', 'Backspace', 'Delete', 'Insert', 'Space'];
@@ -361,12 +366,13 @@ const CALL_BUDGET = 42000;
 // A model the key cannot use, or one that is too slow to answer, must not end the run: the same call
 // is retried on a smaller model first. GEMINI_MODEL, when set, is used alone and obeyed exactly.
 const FALLBACK_MODELS = ['gemini-3.6-flash', 'gemini-3.5-flash-lite'];
-async function gemini(env, { prompt, image, maxTokens, deadline = Date.now() + CALL_BUDGET }) {
+async function gemini(env, { prompt, image, maxTokens, speed = DEFAULT_SPEED, deadline = Date.now() + CALL_BUDGET }) {
   if (!env.GEMINI_API_KEY) throw new Error('Server is missing GEMINI_API_KEY.');
   const started = Date.now();
   const parts = image ? [{ text: prompt }, { inlineData: { mimeType: 'image/jpeg', data: image } }] : [{ text: prompt }];
   const explicit = (env.GEMINI_MODEL || '').trim();
-  const models = explicit ? [modelName(env)] : [DEFAULT_MODEL, ...FALLBACK_MODELS.filter(model => model !== DEFAULT_MODEL)];
+  const chosen = SPEED_MODELS[speedOf(speed)];
+  const models = explicit ? [modelName(env)] : [chosen, ...FALLBACK_MODELS.filter(model => model !== chosen)];
   let lastError = new Error('Gemini request failed.');
   for (const model of models) {
     for (let attempt = 1; attempt <= 2; attempt++) {
@@ -425,7 +431,7 @@ export default {
   async fetch(request, env) {
     if (request.method === 'OPTIONS') return json({ ok: true });
     const path = new URL(request.url).pathname;
-    if (path === '/health' && request.method === 'GET') return json({ ok: true, provider: 'gemini', model: modelName(env) });
+    if (path === '/health' && request.method === 'GET') return json({ ok: true, provider: 'gemini', model: modelName(env), speed: DEFAULT_SPEED });
     if (!env.DB) return json({ error: 'Server is missing the DB binding.' }, 503);
     const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
     const started = Date.now();
@@ -557,7 +563,8 @@ export default {
         const { text, ms, model } = await gemini(env, {
           prompt: reviewPrompt({ goal: input.goal, title: input.title, image: hasImage, removed: spot.removed }, page, todos, steps, input.claim, spot),
           image: hasImage ? input.image : undefined,
-          maxTokens: 1000
+          maxTokens: 1000,
+          speed: speedOf(input.speed)
         });
         const parsed = parseJson(text);
         const lines = value => (Array.isArray(value) ? value : []).slice(0, 6).map(item => clip(typeof item === 'string' ? item : item?.text, 200).trim()).filter(Boolean);
@@ -582,24 +589,27 @@ export default {
       if (path === '/agent' && request.method === 'POST') {
         if (await limited(env.DB, 'agent:' + ip, 150, 3600000)) return json({ error: 'Agent limit reached. Try again later.' }, 429);
         const input = await body(request, 12000000);
+        // Fast mode sends a smaller observation: fewer refs, a shorter page text and less tab context.
+        // That is most of the prompt, so it is most of the wait.
+        const speed = speedOf(input.speed);
         const imageOk = input.image === undefined || (typeof input.image === 'string' && /^[A-Za-z0-9+/=]+$/.test(input.image));
         if (typeof input.goal !== 'string' || !input.goal.trim() || input.goal.length > 4000 || typeof input.text !== 'string' || input.text.length > 40000 || !imageOk || !Number.isFinite(input.width) || !Number.isFinite(input.height) || input.width < 1 || input.height < 1 || !Array.isArray(input.steps) || input.steps.length > 40) return json({ error: 'Invalid workflow observation.' }, 400);
         const page = webUrl(input.url);
         if (!page) return json({ error: 'Unsupported page URL.' }, 400);
         const todos = Array.isArray(input.todos) ? input.todos.slice(0, 8).map((todo, index) => ({ id: clip(todo?.id, 40) || String(index + 1), title: clip(todo?.title, 160), done: todo?.done === true })).filter(todo => todo.title) : [];
         const steps = normalizeSteps(input.steps);
-        const contexts = Array.isArray(input.contexts) ? input.contexts.slice(0, 5).map(c => ({ url: clip(c?.url, 2000), title: clip(c?.title, 300), text: clip(c?.text, 8000) })).filter(c => c.url && c.text) : [];
+        const contexts = Array.isArray(input.contexts) ? input.contexts.slice(0, 5).map(c => ({ url: clip(c?.url, 2000), title: clip(c?.title, 300), text: clip(c?.text, speed === 'fast' ? 4000 : 8000) })).filter(c => c.url && c.text) : [];
         const elements = Array.isArray(input.elements) ? input.elements.slice(0, 110).map(element => ({ role: clip(element?.role, 24), name: clip(element?.name, 80), x: Math.round(Number(element?.x)), y: Math.round(Number(element?.y)), off: ['above', 'below'].includes(element?.off) ? element.off : '', state: ['disabled', 'checked'].includes(element?.state) ? element.state : '' })).filter(element => element.name && Number.isFinite(element.x) && Number.isFinite(element.y) && element.x >= -40 && element.x <= input.width + 40 && element.y >= -input.height && element.y <= input.height * 2) : [];
-        const refs = Array.isArray(input.refs) ? input.refs.slice(0, 220).map(ref => ({ ref: clip(ref?.ref, 12), role: clip(ref?.role, 24), name: clip(ref?.name, 80), value: clip(ref?.value, 60), disabled: ref?.disabled === true, checked: ref?.checked === true })).filter(ref => REF.test(ref.ref) && ref.name) : [];
+        const refs = Array.isArray(input.refs) ? input.refs.slice(0, speed === 'fast' ? 50 : speed === 'balanced' ? 65 : 220).map(ref => ({ ref: clip(ref?.ref, 12), role: clip(ref?.role, 24), name: clip(ref?.name, 80), value: clip(ref?.value, 60), disabled: ref?.disabled === true, checked: ref?.checked === true })).filter(ref => REF.test(ref.ref) && ref.name) : [];
         const memory = input.memory && typeof input.memory === 'object' ? { previous: clip(input.memory.previous, 240), outcome: clip(input.memory.outcome, 240), next: clip(input.memory.next, 240) } : null;
         const spot = spotlight(input.text);
-        const observation = { goal: input.goal, title: input.title, width: input.width, height: input.height, automatic: input.automatic, stalled: input.stalled, memory, hasImage: typeof input.image === 'string' && input.image.length > 0, removed: spot.removed, pageBlock: spot.block };
+        const observation = { goal: input.goal, title: input.title, width: input.width, height: input.height, automatic: input.automatic, stalled: input.stalled, memory, hasImage: typeof input.image === 'string' && input.image.length > 0, removed: spot.removed, pageBlock: speed === 'fast' ? clip(spot.block, 14000) : spot.block };
         let actions = null, completed = [], incomplete = [], correction = input.correction ? `CORRECTION: ${clip(input.correction, 600)}` : '', totalMs = 0, model = modelName(env), retried = false, nextMemory = memory;
         // One budget for the whole request, so a correction round cannot double the wall time.
         const deadline = started + 42000;
         for (let round = 1; round <= 2; round++) {
           const prompt = agentPrompt(observation, page, todos, steps, contexts, elements, refs, correction);
-          const result = await gemini(env, { prompt, image: observation.hasImage ? input.image : undefined, maxTokens: 2400, deadline });
+          const result = await gemini(env, { prompt, image: observation.hasImage ? input.image : undefined, maxTokens: 2400, speed, deadline });
           totalMs += result.ms; model = result.model;
           let parsed;
           try { parsed = parseJson(result.text); } catch (error) { if (round === 2) throw error; correction = `CORRECTION: ${error.message} Reply with a single JSON object.`; retried = true; continue; }

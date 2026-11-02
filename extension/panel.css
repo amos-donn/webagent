@@ -78,3 +78,5 @@ button.plan-mark:hover { opacity: .75; }
 @keyframes spin{to{transform:rotate(360deg)}}
 .icon-btn .ph{opacity:.9}
 button.plan-mark{display:grid;place-items:center;line-height:1}
+/* The speed picker reuses the URL field's box so Settings stays one shape. */
+.auth select{box-sizing:border-box;font:inherit;color:var(--ink);width:100%;border:1px solid #e0e7df;background:#fafbf9;border-radius:8px;padding:11px 12px;outline:none}

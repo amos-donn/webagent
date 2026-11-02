@@ -32,12 +32,22 @@ test('plan endpoint returns a numbered checklist without sending an image', asyn
   } finally { mock.restore(); }
 });
 
-test('the model is configurable with GEMINI_MODEL and defaults to 3.8 Flash', async () => {
+test('the model is configurable with GEMINI_MODEL and follows the speed setting', async () => {
   const defaults = scripted([{ steps:['One step'] }]);
   try {
     await worker.fetch(request({ goal:'Check prices', url:'https://example.com/' }, '/plan'), { DB:db, GEMINI_API_KEY:'test-key' });
-    assert.match(defaults.urls[0], /\/models\/gemini-3\.8-flash:generateContent$/);
+    assert.match(defaults.urls[0], /\/models\/gemini-3\.5-flash-lite:generateContent$/, 'the default speed uses the light model');
   } finally { defaults.restore(); }
+  const careful = scripted([{ actions:[click()] }]);
+  try {
+    await worker.fetch(request({ ...observation, speed:'careful' }), { DB:db, GEMINI_API_KEY:'test-key' });
+    assert.match(careful.urls[0], /\/models\/gemini-3\.8-flash:generateContent$/, 'careful asks the strongest model');
+  } finally { careful.restore(); }
+  const unknown = scripted([{ actions:[click()] }]);
+  try {
+    await worker.fetch(request({ ...observation, speed:'ludicrous' }), { DB:db, GEMINI_API_KEY:'test-key' });
+    assert.match(unknown.urls[0], /\/models\/gemini-3\.5-flash-lite:generateContent$/, 'an unknown speed falls back to fast');
+  } finally { unknown.restore(); }
   const mock = scripted([{ steps:['One step'] }]);
   try {
     await worker.fetch(request({ goal:'Check prices', url:'https://example.com/' }, '/plan'), { DB:db, GEMINI_API_KEY:'test-key', GEMINI_MODEL:'models/gemini-3.8-flash' });
@@ -538,7 +548,7 @@ test('a model the key cannot use falls back instead of failing the round', async
     return Response.json({ candidates:[{ content:{ role:'model', parts:[{ text: JSON.stringify({ actions:[click()] }) }] }, finishReason:'STOP' }] });
   };
   try {
-    const response = await worker.fetch(request(observation), { DB:db, GEMINI_API_KEY:'test-key' });
+    const response = await worker.fetch(request({ ...observation, speed:'careful' }), { DB:db, GEMINI_API_KEY:'test-key' });
     assert.equal(response.status, 200, 'an unavailable model is not the end of the run');
     assert.equal((await response.json()).action.type, 'click');
     assert.match(urls.at(-1), /gemini-3\.6-flash:generateContent$/);
