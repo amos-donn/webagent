@@ -311,11 +311,17 @@ async function persist() {
 }
 function welcome() {
   const box = document.createElement('div'); box.className = 'welcome';
-  const icon = document.createElement('span'); icon.className = 'welcome-icon'; setIcon(icon, 'asterisk', 15);
-  const body = document.createElement('div');
-  const strong = document.createElement('strong'); strong.textContent = 'Ready.';
-  const p = document.createElement('p'); p.textContent = "Type a task and I'll use the starred tab, plan only when it helps, act on my own, and tick steps off only once they actually change the page. Type / for commands or @ to add another tab as context.";
-  body.append(strong, p); box.append(icon, body);
+  const icon = document.createElement('span'); icon.className = 'welcome-icon'; setIcon(icon, 'asterisk', 14);
+  const body = document.createElement('div'); body.className = 'welcome-body';
+  const strong = document.createElement('strong'); strong.textContent = 'Ready when you are.';
+  const p = document.createElement('p'); p.textContent = "Tell me what to do in this tab. I'll read the page, plan only if it helps, and work through it; every step appears above as it happens.";
+  const examples = document.createElement('div'); examples.className = 'welcome-examples';
+  for (const idea of ['Summarize this page', 'Fill in this form', 'Find this cheaper elsewhere']) {
+    const chip = document.createElement('button'); chip.type = 'button'; chip.className = 'example'; chip.textContent = idea;
+    chip.addEventListener('click', () => { $('goal').value = idea; grow(); $('goal').focus(); });
+    examples.append(chip);
+  }
+  body.append(strong, p, examples); box.append(icon, body);
   return box;
 }
 function renderMessage(message) {

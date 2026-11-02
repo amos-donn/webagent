@@ -10,6 +10,10 @@ Download [dist/mezze-extension.zip](dist/mezze-extension.zip), unzip it, open `c
 
 The default Worker is `https://webagent.amos-donn.workers.dev`. Select a page, enter an objective, and start; Mezze writes a plan first and checks items off as it works. No accounts or sign-in. The extension requests Chrome site access as needed. Autopilot may pause when it meets an origin that has not been granted yet; select Continue to grant access. In review mode, check the proposed text, destination and screenshot marker before approving. With Autopilot on, actions run immediately and may be wrong; use it only when you accept that risk. A page can change after observation, and visual coordinates can be wrong; never approve an action without checking. If a click opens a new tab, select that tab before continuing. The agent does not automatically handle CAPTCHAs, authentication, payment details, downloads, or restricted pages.
 
+## Interface
+
+`panel.css` is a design system, not a pile of one-off rules. Colour, radius, shadow, focus and control-size tokens are declared once at the top and every component reads from them, in light and dark, following `prefers-color-scheme`. The scale is deliberately narrow — a 22 px brand mark, 28 px icon buttons, 32 px primary actions, 8–14 px radii, hairline borders, and a single emerald accent kept for state and focus — so the panel reads as a product surface instead of a form. The empty state offers three starting points, the composer is one lifted surface with its send button inside it, and nothing is fetched at runtime: system fonts and the vendored Phosphor geometry only.
+
 ## Configure your existing Worker and D1
 
 1. `wrangler.jsonc` identifies your existing **webagent** D1 database and binds it as `DB`. Wrangler config is the deployment source of truth; verify the ID in Cloudflare Dashboard → D1 → webagent if your database changes.
