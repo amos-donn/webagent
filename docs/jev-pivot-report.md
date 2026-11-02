@@ -114,7 +114,7 @@ Other claims worth tightening:
 
 ## 7. Plan, cheapest first
 
-**Phase 0 — instrument the loop (no Jev).** Log per round: observe time, payload size, model time, action time, settle time. Without this we cannot say what Jev would save, and the pitch's central number stays unverifiable. One run of `evals/run.mjs` with a live key produces the baseline.
+**Phase 0 — instrument the loop (no Jev).** Log per round: observe time, payload size, model time, action time, settle time. Without this we cannot say what Jev would save, and the pitch's central number stays unverifiable. One run of `evals/run.mjs` with a live key produces the baseline. Shipped: `extension/panel.js` now keeps one record per round — read, model, network, act, payload bytes, screenshot flag and token counts — and `/timings` prints the medians and exports the JSON.
 
 **Phase 1 — shadow.** `worker/jev.js` adapter (request builder for `next`/`target`/`needs_system_2`/`on_track`, response shaper, version pinning), `JEV_MODE=shadow` runs it in parallel and logs agreement with the Gemini action. Nothing user-visible. Success criterion: agreement on the action kind ≥ some floor on navigation-heavy tasks, and a measured latency delta on the Jev leg.
 

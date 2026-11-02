@@ -88,6 +88,18 @@ Three settings decide how long a round takes, and all three are in **Settings**:
 
 The setting applies from the next action; a run already in flight keeps the speed it started with until the next round. A model that errors falls back to the next one down the chain rather than ending the run, and `GEMINI_MODEL`, when set, overrides the speed setting entirely.
 
+## What a round costs
+
+`/timings` prints what the last 60 rounds actually spent, and exports every record as `mezze-timings.json`:
+
+- **read** — the observation round trip, including a second read when a screenshot had to be taken
+- **model** — the Worker's own timing of the Gemini call, including its internal correction retry
+- **network** — the round trip minus the model, so Worker overhead and transport are visible
+- **act** — the CDP action and its effect check, settle window included
+- **payload** — the exact byte count of the JSON sent to `/agent`, plus whether the round carried a screenshot and the Worker's prompt/completion token counts
+
+One record is written per decision, capped at 400 in extension storage, and the first round of a run reports `read` as unknown rather than zero because its observation is taken alongside the planner. This is the baseline the System 1 question in [docs/jev-pivot-report.md](docs/jev-pivot-report.md) depends on: replacing a model call only shortens a round by the model's share of it, and until these numbers exist that share is a guess.
+
 ## Accessibility refs, safety boundary, skills, evals and the MCP bridge
 
 **Grounding.** Every observation now includes an accessibility-tree snapshot (`Accessibility.getFullAXTree`) exposed as refs (`e12`). Actions may target `{"ref":"e12"}` instead of coordinates, which works off-screen and inside shadow roots; refs are stored per tab in session storage and expire with the page. A `fill` action sets up to 12 fields in one call.

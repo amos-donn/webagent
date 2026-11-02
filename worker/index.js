@@ -431,7 +431,9 @@ async function gemini(env, { prompt, image, maxTokens, speed = DEFAULT_SPEED, de
           error.fallback = reason === 'MAX_TOKENS';
           throw error;
         }
-        return { text, ms: Date.now() - started, model };
+        // Usage is what makes a round's cost legible, and it is the only number a faster decision
+        // model would actually move.
+        return { text, ms: Date.now() - started, model, tokens: { in: Number(data?.usageMetadata?.promptTokenCount) || 0, out: Number(data?.usageMetadata?.candidatesTokenCount) || 0 } };
       } catch (thrown) {
         // A rejected request or an empty candidate will not improve on a retry on the same model; a
         // 429, a 5xx, a network drop or a timeout usually will.
@@ -625,16 +627,17 @@ export default {
         const memory = input.memory && typeof input.memory === 'object' ? { previous: clip(input.memory.previous, 240), outcome: clip(input.memory.outcome, 240), next: clip(input.memory.next, 240) } : null;
         const tabs = Array.isArray(input.tabs) ? input.tabs.slice(0, 20).map(tab => ({ id: clip(tab?.id, 8), title: clip(tab?.title, 120), url: clip(tab?.url, 300), acting: tab?.acting === true, context: tab?.context === true, opened: tab?.opened === true })).filter(tab => TAB_REF.test(tab.id)) : [];
         const spot = spotlight(input.text);
-        const observation = { goal: input.goal, title: input.title, width: input.width, height: input.height, automatic: input.automatic, stalled: input.stalled, memory, tabs, hasImage: typeof input.image === 'string' && input.image.length > 0, removed: spot.removed, pageBlock: speed === 'fast' ? clip(spot.block, 14000) : spot.block };        let actions = null, completed = [], incomplete = [], correction = input.correction ? `CORRECTION: ${clip(input.correction, 600)}` : '', totalMs = 0, model = modelName(env), retried = false, nextMemory = memory;
+        const observation = { goal: input.goal, title: input.title, width: input.width, height: input.height, automatic: input.automatic, stalled: input.stalled, memory, tabs, hasImage: typeof input.image === 'string' && input.image.length > 0, removed: spot.removed, pageBlock: speed === 'fast' ? clip(spot.block, 14000) : spot.block };        let actions = null, completed = [], incomplete = [], correction = input.correction ? `CORRECTION: ${clip(input.correction, 600)}` : '', totalMs = 0, model = modelName(env), retried = false, nextMemory = memory, tokens = { in: 0, out: 0 };
         // One budget for the whole request, so a correction round cannot double the wall time.
         const deadline = started + 42000;
         for (let round = 1; round <= 2; round++) {
           const prompt = agentPrompt(observation, page, todos, steps, contexts, elements, refs, correction);
           const result = await gemini(env, { prompt, image: observation.hasImage ? input.image : undefined, maxTokens: 2400, speed, deadline });
           totalMs += result.ms; model = result.model;
+          tokens.in += result.tokens?.in || 0; tokens.out += result.tokens?.out || 0;
           let parsed;
           try { parsed = parseJson(result.text); } catch (error) { if (round === 2) throw error; correction = `CORRECTION: ${error.message} Reply with a single JSON object.`; retried = true; continue; }
-          if (parsed?.needScreenshot === true) return json({ needScreenshot: true, memory: nextMemory, ms: totalMs || Date.now() - started, model });
+          if (parsed?.needScreenshot === true) return json({ needScreenshot: true, memory: nextMemory, ms: totalMs || Date.now() - started, model, tokens });
           if (parsed?.memory && typeof parsed.memory === 'object') nextMemory = { previous: clip(parsed.memory.previous, 240), outcome: clip(parsed.memory.outcome, 240), next: clip(parsed.memory.next, 240) };
           const completedRaw = parsed?.completed ?? parsed?.completed_todos ?? parsed?.todo ?? [];
           let next;
@@ -652,7 +655,7 @@ export default {
           break;
         }
         if (!actions) throw new Error('The agent did not return a usable action.');
-        return json({ actions, action: actions[0], completed, incomplete, memory: nextMemory, retried, injection: spot.removed.length, ms: totalMs || Date.now() - started, model });
+        return json({ actions, action: actions[0], completed, incomplete, memory: nextMemory, retried, injection: spot.removed.length, ms: totalMs || Date.now() - started, model, tokens });
       }
       return json({ error: 'Not found.' }, 404);
     } catch (error) { console.error('Request failed:', error.message); return json({ error: error.message || 'Request failed.' }, error.status === 429 ? 429 : 400); }

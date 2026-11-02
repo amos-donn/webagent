@@ -629,3 +629,19 @@ test('a round without an image is grounded in the tree and the viewport', async 
     assert.match(prompt, /Coordinates are viewport pixels/);
   } finally { mock.restore(); }
 });
+
+test('a corrected round reports what both calls spent', async () => {
+  const original = globalThis.fetch;
+  const reply = (action, prompt, out) => ({ candidates:[{ content:{ role:'model', parts:[{ text: JSON.stringify(action) }] }, finishReason:'STOP' }], usageMetadata:{ promptTokenCount: prompt, candidatesTokenCount: out } });
+  const replies = [reply({ type:'click', x:10, y:20, description:'Open menu' }, 1234, 56), reply({ type:'scroll', direction:'down', description:'Reveal more items' }, 1200, 40)];
+  let index = 0;
+  globalThis.fetch = async () => Response.json(replies[Math.min(index++, replies.length - 1)]);
+  try {
+    const steps = [{ type:'click', x:11, y:19, description:'Open menu', ok:true }, { type:'click', x:10, y:21, description:'Open menu again', ok:true }];
+    const response = await worker.fetch(request({ ...observation, steps }), { DB:db, GEMINI_API_KEY:'test-key' });
+    const out = await response.json();
+    assert.equal(out.retried, true, 'the repeat is what makes this a two-call round');
+    assert.deepEqual(out.tokens, { in: 2434, out: 96 }, 'tokens are summed across the correcting calls');
+    assert.equal(index, 2);
+  } finally { globalThis.fetch = original; }
+});

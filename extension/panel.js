@@ -43,6 +43,58 @@ const PACING = { fast: 120, balanced: 400, careful: 800 };
 const SETTLE_MS = { fast: 800, balanced: 2200, careful: 4000 };
 const pace = () => PACING[speed] || PACING.balanced;
 const settleFor = () => (slowPages ? 4000 : SETTLE_MS[speed] || SETTLE_MS.balanced);
+/* ---------- round timings ---------- */
+// Phase 0 of the System 1 work: a round is read + decide + act, and until those are three separate
+// numbers nobody can say what a faster decision model would actually save. One record per round,
+// capped in local storage, read back with /timings.
+const METRICS_KEY = 'timings';
+const METRICS_LIMIT = 400;
+let timings = [];
+function logTiming(record) {
+  if (!record) return;
+  timings.push(record);
+  timings = timings.slice(-METRICS_LIMIT);
+  chrome.storage.local.set({ [METRICS_KEY]: timings }).catch(() => {});
+}
+// The action that follows a decision is timed after the record was opened, so the record is closed
+// when the next round starts, when the run ends, or when the final check takes over.
+function flushTiming(run) {
+  const record = run?.timing;
+  if (!record) return;
+  run.timing = null;
+  record.total = [record.observeMs, record.modelMs, record.netMs, record.actionMs].reduce((sum, value) => sum + (Number(value) || 0), 0);
+  logTiming(record);
+}
+function noteActionMs(run, started, type) {
+  const record = run?.timing;
+  if (!record) return;
+  record.actionMs = (record.actionMs || 0) + Math.max(0, Math.round(performance.now() - started));
+  record.actions = (record.actions || 0) + 1;
+  record.kinds = [...(record.kinds || []), type];
+}
+const median = values => { const list = values.filter(value => Number.isFinite(value)).sort((a, b) => a - b); if (!list.length) return 0; const mid = Math.floor(list.length / 2); return list.length % 2 ? list[mid] : Math.round((list[mid - 1] + list[mid]) / 2); };
+const p90 = values => { const list = values.filter(value => Number.isFinite(value)).sort((a, b) => a - b); return list.length ? list[Math.min(list.length - 1, Math.ceil(list.length * 0.9) - 1)] : 0; };
+function timingSummary() {
+  const list = timings.slice(-60);
+  if (!list.length) return ['No rounds logged yet. Run a task, then /timings.'];
+  const secs = value => `${(value / 1000).toFixed(2)}s`;
+  const shots = list.filter(record => record.image).length;
+  const bytes = Math.round(list.reduce((sum, record) => sum + (record.bytes || 0), 0) / list.length);
+  const tokensIn = list.reduce((sum, record) => sum + (record.tokens?.in || 0), 0);
+  const tokensOut = list.reduce((sum, record) => sum + (record.tokens?.out || 0), 0);
+  const modelMs = median(list.map(record => record.modelMs || 0));
+  const totalMs = median(list.map(record => record.total || 0));
+  return [
+    `${list.length} round${list.length === 1 ? '' : 's'} logged · median ${secs(totalMs)} · p90 ${secs(p90(list.map(record => record.total || 0)))}`,
+    `Median split: read ${secs(median(list.map(record => record.observeMs || 0)))} · model ${secs(modelMs)} · network ${secs(median(list.map(record => record.netMs || 0)))} · act ${secs(median(list.map(record => record.actionMs || 0)))}`,
+    `Model is ${totalMs ? Math.round(modelMs / totalMs * 100) : 0}% of the round · ${shots}/${list.length} rounds used a screenshot · ${Math.round(bytes / 1024)} KB average payload · ${(tokensIn / 1000).toFixed(1)}k in / ${(tokensOut / 1000).toFixed(1)}k out tokens`
+  ];
+}
+function showTimings() {
+  for (const line of timingSummary()) pushMessage('note', line);
+  if (timings.length) download('mezze-timings.json', JSON.stringify(timings, null, 2));
+  notify(timings.length ? 'Timings written to the chat and exported as JSON.' : 'No rounds logged yet.', !timings.length);
+}
 
 function notify(text, error = false) { $('notice').textContent = text; $('notice').classList.toggle('error', error); $('notice').hidden = false; }
 function baseUrl() { const url = new URL($('worker').value.trim()); if (url.username || url.password || url.search || url.hash || (url.protocol !== 'https:' && !(url.protocol === 'http:' && ['localhost','127.0.0.1'].includes(url.hostname)))) throw new Error('Use an HTTPS Worker URL or localhost.'); return url.origin + url.pathname.replace(/\/$/, ''); }
@@ -80,7 +132,7 @@ async function api(path, data, retries = 2) {
   let lastError = new Error('Request failed.');
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
-      const res = await fetch(base + path, { method: 'POST', headers: { 'Content-Type':'application/json' }, body: JSON.stringify(data), signal: AbortSignal.timeout(REQUEST_TIMEOUT) });
+      const res = await fetch(base + path, { method: 'POST', headers: { 'Content-Type':'application/json' }, body: typeof data === 'string' ? data : JSON.stringify(data), signal: AbortSignal.timeout(REQUEST_TIMEOUT) });
       const out = await res.json().catch(() => ({}));
       if (res.ok) { cooldowns = 0; return out; }
       const error = new Error(out.error || `Request failed (${res.status}).`);
@@ -143,6 +195,7 @@ function reportCard(report) {
 // Before a run reports success it looks at the page again and has the model check its own work; a
 // failed check feeds back as a correction instead of ending the run, and the user always gets a report.
 async function finalCheck(run, claim, incomplete = []) {
+  flushTiming(run);
   if (workflow !== run) return;
   loading('Checking the result', 'check');
   $('loading-label').textContent = 'Checking the result against the page';
@@ -415,6 +468,7 @@ function exportChat() {
 
 /* ---------- workflow ---------- */
 function stop() {
+  flushTiming(workflow);
   workflow = null; proposal = null; currentAction(null);
   $('approval').hidden = true; $('stop').hidden = true; $('start').hidden = false;
   $('goal').disabled = false; $('loading').hidden = true;
@@ -503,6 +557,7 @@ function showProposal(run, action, queued, quiet = false) {
 
 async function next(run, prefetched) {
   if (workflow !== run) return;
+  flushTiming(run);
   if (run.steps.length >= STEP_LIMIT) { pushMessage('note', `Stopped at the ${STEP_LIMIT}-action limit. Start a new chat to keep going.`); stop(); return; }
   await listTabs().catch(() => {});
   const acting = tabCache.find(t => t.id === run.actingTabId) || tabCache.find(t => t.active) || tabCache[0];
@@ -513,8 +568,16 @@ async function next(run, prefetched) {
   const contexts = run.contextIds.map(id => tabCache.find(t => t.id === id)).filter(t => t && t.id !== acting.id && t.supported).slice(0, 5);
   try { await permission(); }
   catch (e) { if (workflow !== run) return; halt(run, e.message); return; }
-  let shot = prefetched;
-  if (!shot) { loading(`Reading ${shortTitle(acting)}`, 'eye'); shot = await timed(send('observe', { tabId: acting.id, stayPut }), OBSERVE_TIMEOUT, `Reading ${shortTitle(acting)} took too long — the tab may be stuck or closed.`); if (workflow !== run) return; }
+  // A first round arrives with an observation already in hand, taken next to the planner: that read is
+  // not separately attributable, so it is recorded as unknown rather than as zero.
+  let shot = prefetched, observeMs = null;
+  if (!shot) {
+    const readStart = performance.now();
+    loading(`Reading ${shortTitle(acting)}`, 'eye');
+    shot = await timed(send('observe', { tabId: acting.id, stayPut }), OBSERVE_TIMEOUT, `Reading ${shortTitle(acting)} took too long — the tab may be stuck or closed.`);
+    observeMs = Math.round(performance.now() - readStart);
+    if (workflow !== run) return;
+  }
   const hash = textHash(shot.text);
   run.stalled = hash === run.lastHash ? (run.stalled || 0) + 1 : 0;
   run.apiRetries = 0;
@@ -535,8 +598,10 @@ async function next(run, prefetched) {
   // tree is too thin to act on, or when the model asked to see the page after working from the DOM.
   if (run.wantShot || refs.length < 6) {
     if (!shot.image) {
+      const lookStart = performance.now();
       loading(`Looking at ${shortTitle(acting)}`, 'eye');
       shot = { ...shot, ...(await timed(send('observe', { tabId: acting.id, stayPut, shot: true }), OBSERVE_TIMEOUT, `Looking at ${shortTitle(acting)} took too long.`)) };
+      if (observeMs !== null) observeMs += Math.round(performance.now() - lookStart);
       if (workflow !== run) return;
       refs = Array.isArray(shot.refs) ? shot.refs : [];
     }
@@ -567,10 +632,19 @@ async function next(run, prefetched) {
   const done = plan.filter(item => item.done).length;
   loading(plan.length ? `Thinking · ${done}/${plan.length} plan steps · action ${run.steps.length + 1}/${STEP_LIMIT}` : `Thinking about action ${run.steps.length + 1}`, 'sparkle');
   const sendImage = !!shot.image;
+  const body = { goal:aimed(run), speed, intent:[run.goal, ...plan.map(item => item.title)].join('\n'), todos:plan, steps:run.steps, url:shot.url, title:shot.title, text:shot.text, ...(sendImage ? { image: shot.image } : {}), width:naturalWidth, height:naturalHeight, elements, refs, tabs, memory: run.memory || undefined, stalled:run.stalled, automatic:run.mode === 'autopilot', correction: run.correction || undefined, };
+  // Serialised once and sent verbatim, so the byte count below is the payload the Worker really gets.
+  const payload = JSON.stringify(body);
+  run.timing = { at: Date.now(), round: run.steps.length + 1, goal: run.goal.slice(0, 80), speed, refs: refs.length, image: sendImage, bytes: new TextEncoder().encode(payload).length, observeMs, actionMs: 0, actions: 0, settle: settleFor() };
   const started = performance.now();
-  const { actions, action, completed, incomplete, memory, needScreenshot, ms } = await api('/agent', { goal:aimed(run), speed, intent:[run.goal, ...plan.map(item => item.title)].join('\n'), todos:plan, steps:run.steps, url:shot.url, title:shot.title, text:shot.text, ...(sendImage ? { image: shot.image } : {}), width:image.naturalWidth, height:image.naturalHeight, elements, refs, tabs, memory: run.memory || undefined, stalled:run.stalled, automatic:run.mode === 'autopilot', correction: run.correction || undefined, contexts:extra });  if (memory) run.memory = memory;
+  const answer = await api('/agent', payload);
+  const apiMs = Math.round(performance.now() - started);
+  const { actions, action, completed, incomplete, memory, needScreenshot, ms, tokens, model } = answer;
+  // The Worker's own timing is the model call; the rest of the round trip is transport.
+  Object.assign(run.timing, { modelMs: Number(ms) || 0, netMs: Math.max(0, apiMs - (Number(ms) || 0)), model: model || '', tokens: tokens || null });
+  if (memory) run.memory = memory;
   run.correction = '';
-  if (needScreenshot && !run.wantShot) { run.wantShot = true; return next(run); }
+  if (needScreenshot && !run.wantShot) { if (run.timing) run.timing.screenshotAsked = true; run.wantShot = true; return next(run); }
   run.wantShot = false;
   const elapsed = ms ?? Math.round(performance.now() - started);
   if (workflow !== run) return;
@@ -725,6 +799,7 @@ async function executeOne(run, current) {
   loading(LABELS[action.type] || 'Working', ICONS[action.type] || 'sparkle');
   currentAction(activeLabel(action));
   proposal = null;
+  const actionStart = performance.now();
   let result;
   try {
     if (action.type === 'navigate') {
@@ -738,6 +813,7 @@ async function executeOne(run, current) {
     }
     result = TAB_STEPS.has(action.type) ? await actOnTabs(run, action) : await send('act', { ...current, settleMs: settleFor(), stayPut, goal: run.goal, intent: [run.goal, ...plan.map(item => item.title)].join('\n'), allow: run.allow, automatic: run.mode === 'autopilot' });  }
   catch (error) {
+    noteActionMs(run, actionStart, action.type);
     if (workflow !== run) return 'stop';
     // A rate-limited write or click is also just a pause: wait out the window, then look again.
     if (isRateLimit(error.status, error.message) && cooldowns < COOLDOWN_LIMIT) { await cooldown(); return 'recover'; }
@@ -756,6 +832,7 @@ async function executeOne(run, current) {
     return 'failed';
   }
   if (workflow !== run) return 'stop';
+  noteActionMs(run, actionStart, action.type);
   if (result?.notice) pushMessage('note', result.notice);
   if (result?.generated) pushMessage('note', `Gemini wrote ${Number(result.generated).toLocaleString()} characters into the field.`);
   const verified = result?.effect?.verified;
@@ -824,6 +901,7 @@ const COMMANDS = [
   { cmd: '/auto-plan', hint: "Let the agent decide about a checklist", run: () => setPlanMode('auto') },
   { cmd: '/skill', hint: 'Save this run as a reusable skill', run: () => saveSkill().catch(e => notify(e.message || 'Could not save the skill.', true)) },
   { cmd: '/saw', hint: 'Show the screenshot behind the last step', run: () => openSaw() },
+  { cmd: '/timings', hint: 'Show what a round costs', run: () => showTimings() },
   { cmd: '/stop', hint: 'Stop the running workflow', run: () => { stop(); notify('Workflow stopped.'); } }
 ];
 function setPlanMode(value) { planMode = value; chrome.storage.local.set({ planMode }); notify(value === 'always' ? 'Every task will get a checklist.' : value === 'never' ? 'Tasks will run without a checklist.' : 'The agent decides whether a checklist helps.'); }
@@ -952,7 +1030,7 @@ $('stay-toggle').addEventListener('change', async () => {
 chrome.runtime.onMessage.addListener(message => { if (message && message.type === 'pointerBlocked') notify('Pointer is on, but this page blocks the cursor overlay — the click still went ahead.', true); });
 
 (async () => {
-  const saved = await chrome.storage.local.get(['worker', 'chats', 'activeChat', 'planMode', 'lastShot', 'skills', 'bridge', 'pointer', 'speed', 'slowPages', 'stayPut']);
+  const saved = await chrome.storage.local.get(['worker', 'chats', 'activeChat', 'planMode', 'lastShot', 'skills', 'bridge', 'pointer', 'speed', 'slowPages', 'stayPut', 'timings']);
   $('worker').value = saved.worker || 'https://webagent.amos-donn.workers.dev';
   skills = Array.isArray(saved.skills) ? saved.skills : [];
   $('bridge-toggle').checked = saved.bridge === true;
@@ -966,6 +1044,7 @@ chrome.runtime.onMessage.addListener(message => { if (message && message.type ==
   planMode = ['auto', 'always', 'never'].includes(saved.planMode) ? saved.planMode : 'auto';
   lastShot = saved.lastShot || '';
   $('saw-btn').hidden = !lastShot;
+  timings = Array.isArray(saved.timings) ? saved.timings : [];
   chats = Array.isArray(saved.chats) ? saved.chats : [];
   chat = chats.find(item => item.id === saved.activeChat) || chats[0] || newChatRecord();
   if (!chats.includes(chat)) chats.unshift(chat);
