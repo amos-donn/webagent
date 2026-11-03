@@ -1,11 +1,13 @@
 const $ = id => document.getElementById(id);
-const ICONS = { think:'sparkle', click:'cursor-click', type:'keyboard', write:'sparkle', read:'book-open-text', scroll:'arrows-down-up', wait:'hourglass', navigate:'arrow-right', key:'key-return', switch:'arrow-right', open:'plus', gather:'book-open-text', close:'x', select:'arrows-down-up', secret:'keyboard', transcribe:'book-open-text' };
+const ICONS = { think:'sparkle', click:'cursor-click', type:'keyboard', write:'sparkle', read:'book-open-text', scroll:'arrows-down-up', wait:'hourglass', navigate:'arrow-right', key:'key-return', switch:'arrow-right', open:'plus', gather:'book-open-text', close:'x', select:'arrows-down-up', secret:'keyboard', transcribe:'book-open-text', write_file:'sparkle', append_file:'sparkle', read_file:'book-open-text', list_files:'book-open-text' };
 // Two names per step: what it is doing while it runs, and what it did once it finished. The
 // timeline keeps the past tense because it is a record of work, not a spinner that vanished.
 const VERBS = {
   think: ['Thinking', 'Thought'], click: ['Clicking', 'Clicked'], type: ['Typing', 'Typed'],
   write: ['Writing with Gemini', 'Wrote'], read: ['Reading the page', 'Read the page'],
   transcribe: ['Transcribing audio', 'Transcribed audio'],
+  write_file: ['Writing the file', 'Wrote the file'], append_file: ['Adding to the file', 'Added to the file'],
+  read_file: ['Reading the file', 'Read the file'], list_files: ['Listing files', 'Listed the files'],
   scroll: ['Scrolling', 'Scrolled'], wait: ['Waiting', 'Waited'],
   navigate: ['Opening the page', 'Opened the page'], key: ['Pressing a key', 'Pressed a key'],
   switch: ['Switching tabs', 'Switched tabs'], open: ['Opening a new page', 'Opened a new page'],
@@ -18,7 +20,9 @@ function activeLabel(action) {
   const what = String(action.description || '').trim();
   return `${verb(action.type)}${what ? `: ${what}` : ''}`;
 }
-const TAB_STEPS = new Set(['open', 'switch', 'gather', 'close', 'transcribe']);const STEP_LIMIT = 60;
+const TAB_STEPS = new Set(['open', 'switch', 'gather', 'close', 'transcribe']);
+// The vault steps run in the panel, not the page: no tab, no settle window, no approval.
+const FILE_STEPS = new Set(['write_file', 'append_file', 'read_file', 'list_files']);const STEP_LIMIT = 60;
 const MAX_CHATS = 20;
 const MAX_MESSAGES = 400;
 const RISK = /\b(buy now|place order|pay now|purchase|checkout|transfer|withdraw|delete account|close account|cancel subscription)\b/i;
@@ -90,6 +94,23 @@ function spend(run, record) {
 // One record per task, closed on every way a run can end. Wall clock, so it includes the pauses for
 // your approval and the settle windows — that is the wait being measured. Guarded by taskLogged
 // because the report path closes the task before stop() runs.
+// Every task leaves its step log in the vault: what was asked, what was done, and what it cost. Cheap,
+// and it is how a later task can see what was already tried instead of starting from nothing.
+function writeRunLog(run, status, record) {
+  const stamp = new Date(record.startedAt || Date.now()).toISOString().slice(0, 19).replace(/[:T]/g, '-');
+  const steps = (run.steps || []).map((step, index) => `${index + 1}. ${step.ok === false ? 'FAILED ' : ''}${step.type}: ${String(step.description || '').slice(0, 200)}${step.note ? ` — ${String(step.note).slice(0, 200)}` : ''}`);
+  const lines = [
+    `# ${String(run.goal || 'Task').slice(0, 160)}`,
+    '',
+    `- status: ${status}`,
+    `- started: ${new Date(record.startedAt || Date.now()).toISOString()}`,
+    `- rounds: ${record.rounds || 0}, steps: ${steps.length}`,
+    steps.length ? '\n## Steps' : '',
+    ...steps,
+    ''
+  ];
+  return Vault.writeText(`runs/${stamp}.md`, lines.join('\n'));
+}
 function finishTask(run, status = 'done') {
   if (!run || run.taskLogged) return null;
   run.taskLogged = true;
@@ -107,6 +128,7 @@ function finishTask(run, status = 'done') {
     speed
   };
   logTiming(record);
+  writeRunLog(run, status, record).catch(() => {});
   return record;
 }
 function taskLine(record) {
@@ -853,6 +875,37 @@ async function rememberFact(run, action) {
   pushMessage('note', action.forget ? 'Forgot “' + key + '”.' : 'Noted ' + key + ': ' + String(notesStore[key]).slice(0, 160));
   return 'ok';
 }
+// The vault is Mezze's own filesystem, so these steps never touch the page. What they do still shows in
+// the run, because memory.md is what the next task starts from.
+async function actOnVault(run, action) {
+  if (action.type === 'list_files') {
+    const dir = action.dir || '';
+    const entries = await Vault.list(dir);
+    const lines = entries.map(entry => entry.kind === 'directory' ? `${entry.path}/` : `${entry.path} — ${Vault.humanSize(entry.bytes)}`);
+    const text = lines.length ? lines.join('\n') : `${dir || 'The vault'} is empty.`;
+    run.fileText = { path: dir ? `${dir}/` : 'the vault', text: text.slice(0, 4000) };
+    pushMessage('note', lines.length ? `Listed ${dir ? `${dir}/` : 'the vault'} — ${lines.length} entr${lines.length === 1 ? 'y' : 'ies'}.` : `${dir || 'The vault'} is empty.`);
+    return { text, effect: { verified: true } };
+  }
+  const path = action.path;
+  if (action.type === 'read_file') {
+    if (!Vault.isText(path)) throw new Error(`${path} is not a text file, so it cannot be read back into a run.`);
+    let text;
+    try { text = await Vault.readText(path); }
+    catch { throw new Error(`${path} is not in the vault. Use list_files to see what is there.`); }
+    const shown = text.slice(0, 12000);
+    run.fileText = { path, text: shown, truncated: text.length > shown.length };
+    pushMessage('note', `Read ${path} — ${text.length.toLocaleString()} characters.`);
+    return { text: shown, effect: { verified: true } };
+  }
+  const written = action.type === 'append_file' ? await Vault.appendText(path, action.text) : await Vault.writeText(path, action.text);
+  if (written.path === 'memory.md') {
+    vaultIndexCache = await Vault.readText('memory.md').catch(() => vaultIndexCache);
+    pushMessage('note', 'That was memory.md — the index you read at the start of every task.');
+  }
+  pushMessage('note', `${action.type === 'append_file' ? 'Added to' : 'Wrote'} ${written.path} — ${Vault.humanSize(written.bytes)}.`);
+  return { file: written.path, bytes: written.bytes, effect: { verified: true } };
+}
 // A blocking question: the run waits here until the person answers, which is the only way past a
 // CAPTCHA or a choice the goal does not settle. The answer becomes a step, so the next round sees it.
 function askUser(run, action) {
@@ -914,6 +967,7 @@ async function next(run, prefetched) {
   if (workflow !== run) return;
   flushTiming(run);
   await loadNotes().catch(() => {});
+  await loadVaultIndex().catch(() => {});
   if (run.paused && !(await hold(run))) return;
   if (workflow !== run) return;
   if (run.steps.length >= STEP_LIMIT) { pushMessage('note', `Stopped at the ${STEP_LIMIT}-action limit. Start a new chat to keep going.`); stop(); return; }
@@ -992,7 +1046,8 @@ async function next(run, prefetched) {
   const sendImage = !!shot.image;
   // Every field is normalised here, because the Worker's only answer to a bad one is a 400 that the
   // panel cannot explain. Context tabs belong in this body: dropping them silently cost attachments.
-  const body = { goal:aimed(run), speed, intent:[run.goal, ...plan.map(item => item.title)].join('\n'), todos:plan, steps:run.steps.slice(-60), url:shot.url, title:shot.title, text:String(shot.text || ''), ...(sendImage ? { image: shot.image } : {}), width:Math.max(1, Math.round(Number(naturalWidth) || width)), height:Math.max(1, Math.round(Number(naturalHeight) || height)), elements, refs, tabs, contexts:extra, memory: run.memory || undefined, notes: notesList(), shadow: shadowMode, ...(run.shots?.length ? { images: run.shots } : {}), stalled:run.stalled, automatic:run.mode === 'autopilot', history: run.history?.length ? run.history : undefined, correction: run.correction || undefined };
+  const body = { goal:aimed(run), speed, intent:[run.goal, ...plan.map(item => item.title)].join('\n'), todos:plan, steps:run.steps.slice(-60), url:shot.url, title:shot.title, text:String(shot.text || ''), ...(sendImage ? { image: shot.image } : {}), width:Math.max(1, Math.round(Number(naturalWidth) || width)), height:Math.max(1, Math.round(Number(naturalHeight) || height)), elements, refs, tabs, contexts:extra, memory: run.memory || undefined, notes: notesList(), memoryIndex: vaultIndexCache || undefined, fileText: run.fileText || undefined, shadow: shadowMode, ...(run.shots?.length ? { images: run.shots } : {}), stalled:run.stalled, automatic:run.mode === 'autopilot', history: run.history?.length ? run.history : undefined, correction: run.correction || undefined };
+  run.fileText = null;
   // Serialised once and sent verbatim, so the byte count below is the payload the Worker really gets.
   const payload = JSON.stringify(body);
   run.timing = { at: Date.now(), round: run.steps.length + 1, goal: run.goal.slice(0, 80), speed, refs: refs.length, image: sendImage, bytes: new TextEncoder().encode(payload).length, observeMs, actionMs: 0, actions: 0, settle: settleFor() };
@@ -1203,7 +1258,8 @@ async function executeOne(run, current) {
       } else pushMessage('note', 'Could not capture ' + shortTitle(seen) + ', so that image is missing.');
       result = { seen: !!shotTab?.image, effect: { verified: null } };
     }
-    if (action.type !== 'see') result = TAB_STEPS.has(action.type) ? await actOnTabs(run, action) : await send('act', { ...current, settleMs: settleFor(), stayPut, goal: run.goal, intent: [run.goal, ...plan.map(item => item.title)].join('\n'), allow: run.allow, automatic: run.mode === 'autopilot' });  }
+    if (FILE_STEPS.has(action.type)) result = await actOnVault(run, action);
+    else if (action.type !== 'see') result = TAB_STEPS.has(action.type) ? await actOnTabs(run, action) : await send('act', { ...current, settleMs: settleFor(), stayPut, goal: run.goal, intent: [run.goal, ...plan.map(item => item.title)].join('\n'), allow: run.allow, automatic: run.mode === 'autopilot' });  }
   catch (error) {
     noteActionMs(run, actionStart, action.type);
     if (workflow !== run) return 'stop';
@@ -1245,7 +1301,9 @@ async function executeOne(run, current) {
   // A transcript is the evidence for the next round, so more of it travels than a page excerpt.
   const note = !result?.text ? ''
     : action.type === 'transcribe' ? `transcript: ${String(result.text).slice(0, 6000)}`
-      : ['read', 'gather'].includes(action.type) ? `page excerpt: ${String(result.text).slice(0, 1500)}` : '';
+      : action.type === 'read_file' ? `file text: ${String(result.text).slice(0, 1200)}`
+        : action.type === 'list_files' ? `folder: ${String(result.text).slice(0, 600)}`
+          : ['read', 'gather'].includes(action.type) ? `page excerpt: ${String(result.text).slice(0, 1500)}` : '';
   run.steps.push({ type: action.type, description: action.description || '', ok: true, changed, page: current.url, note, code: result?.code || '', ref: action.ref, x: current.action.x, y: current.action.y, url: action.url, direction: action.direction, text: action.type === 'type' ? action.text : undefined });
   recordActivity(action, result?.url || current.url, result, Math.round(performance.now() - actionStart), null, { changed, fallback: !!result?.fallback, opened: action.type === 'open' ? { url: result?.url, title: result?.title } : undefined });
   currentAction(null);
@@ -1588,6 +1646,28 @@ async function autorun() {
 /* ---------- the vault: memory, files, uploads ---------- */
 let lastTranscript = '';
 let vaultDir = 'memory';
+// memory.md is the index every task starts from: one line per topic, the detail beside it in memory/.
+// It is seeded once and owned by the agent after that, and cached here because it rides on every round.
+let vaultIndexCache = null;
+const MEMORY_SEED = [
+  '# Memory',
+  '',
+  'What I keep between tasks: one line per topic, and the detail in the file each line points at.',
+  '',
+  '## Topics',
+  '',
+  '_(nothing yet — the first task that learns something worth keeping adds a line here)_',
+  ''
+].join('\n');
+async function loadVaultIndex() {
+  try { vaultIndexCache = await Vault.readText('memory.md'); }
+  catch { vaultIndexCache = null; }
+  if (vaultIndexCache === null) {
+    try { await Vault.writeText('memory.md', MEMORY_SEED); vaultIndexCache = MEMORY_SEED; }
+    catch { vaultIndexCache = null; }
+  }
+  return vaultIndexCache;
+}
 
 function filesDialog() {
   let dialog = $('files-dialog');
@@ -1682,6 +1762,13 @@ async function renderFiles() {
   list.replaceChildren();
   let entries = [];
   try { entries = await Vault.list(vaultDir); } catch (error) { notify(error.message || 'Could not read the vault.', true); }
+  if (vaultDir === 'memory') {
+    // The index lives at the root of the vault, but it belongs with the topic files it points at.
+    try {
+      const index = await Vault.readText('memory.md');
+      entries = [{ name: 'memory.md', kind: 'file', path: 'memory.md', bytes: index.length, at: Date.now() }, ...entries];
+    } catch { /* not written yet */ }
+  }
   const files = entries.filter(entry => entry.kind !== 'directory');
   if (!files.length) {
     const empty = document.createElement('p');

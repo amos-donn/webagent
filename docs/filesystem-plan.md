@@ -153,7 +153,10 @@ Worker is readable by anyone holding the URL. If syncing becomes worth doing:
 4. **Optional bridges.** Real folder export via an extension tab + `showDirectoryPicker`, R2 sync behind a
    token, SRT/VTT export from script mode.
 
-Phase 1 is in `extension/vault.js` and the Files dialog as of 1.6.0; the rest is still plan.
+Phase 1 is in `extension/vault.js` and the Files dialog as of 1.6.0. Phase 2 followed in 1.10.6: the four
+file actions run in the panel, `memory.md` rides in the worker prompt (spotlighted, cached per round), a
+run's step log is written to `runs/` when it ends, and the index is seeded on first use. Phase 3
+(`/extract` for PDFs and images) and phase 4 (folder export, R2 sync) are still plan.
 
 ## Risks
 

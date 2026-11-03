@@ -153,6 +153,14 @@ configure. The agent keeps notes in `memory/` (one file per topic, with `memory.
 log of a run in `runs/`. Files you upload land in `uploads/` untouched, and transcripts you keep go in
 `transcripts/`.
 
+The agent is aware of this vault, because it is how it remembers across tasks. `memory.md` — one line per
+topic, pointing at `memory/<topic>.md` — is in its prompt every round, and it can act on the rest itself
+with four actions: `write_file`, `append_file`, `read_file` and `list_files`. None of them touch the page,
+so they run without approval and without pausing the run, though the transcript still says what was
+written. What it keeps is its own call: a report when the task asked for one, the numbers it collected in
+`data/`, a plan worth reusing, a topic in `memory/` when something will matter next time. File text is
+marked as data and never as instructions, and the step log of every run lands in `runs/`.
+
 Open it with `/files`: browse the folders, preview or download anything, upload with the button or by
 dropping files onto the dialog, and see how much space the vault is using. `/save` puts the last
 transcript in `transcripts/`.
