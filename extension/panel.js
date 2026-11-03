@@ -1449,6 +1449,7 @@ async function transcribePage(url = null, mode = 'command', forced = null) {
     pushMessage('note', `Transcribing the audio from ${shortTitle(tab)}. It is captured as it plays, so this takes as long as the video runs — keep this panel open.`);
     if (out.paused) pushMessage('note', 'The player is paused. Press play on the video and the transcription continues by itself.');
   } else if (out.paused) pushMessage('note', 'The player is paused — the transcription waits for it to start.');
+  if (out.via === 'frame') pushMessage('note', 'The player is inside a frame on this page, so Mezze is listening in that frame.');
   if (out.via === 'tab') pushMessage('note', 'This player does not expose its own audio track, so Mezze is capturing the whole tab instead. Keep the tab playing — muting Chrome is fine, closing the tab is not.');
   return settled;
 }

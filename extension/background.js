@@ -930,7 +930,7 @@ async function captureMediaAudio(session) {
   if (media.paused) await media.play().catch(() => {});
   let stream = null;
   try { stream = typeof media.captureStream === 'function' ? media.captureStream() : media.mozCaptureStream?.(); } catch { stream = null; }
-  if (!stream?.getAudioTracks?.().length) return { state: 'silent', error: 'That player exposes no audio track to transcribe.' };
+  if (!stream?.getAudioTracks?.().length) return { state: 'silent', error: 'That player exposes no audio track to transcribe.', currentTime: Number(media.currentTime) || 0 };
   const context = new AudioContext({ sampleRate: audio.RATE });
   const source = context.createMediaStreamSource(stream);
   const processor = context.createScriptProcessor(4096, 1, 1);
@@ -1037,17 +1037,49 @@ async function offscreenReady() {
   });
 }
 
-async function tabAudioStart(tab, session) {
+async function tabAudioStart(tab, session, startTime) {
   if (!chrome.tabCapture?.getMediaStreamId) throw new Error('This Chrome does not offer tab audio capture.');
   const streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tab.id });
   await offscreenReady();
-  // The transcript lines are timed against the media element, so the capture counts from the
-  // element's own clock rather than from zero.
-  const started = await chrome.runtime.sendMessage({ target: 'offscreen', type: 'tab-capture-start', session, streamId, startTime: await pageMediaTime(tab.id) });
+  // The transcript lines are timed against the media element, so the capture counts from the element's
+  // own clock rather than from zero — including when that element lives in a frame.
+  const from = Number.isFinite(startTime) ? startTime : await pageMediaTime(tab.id);
+  const started = await chrome.runtime.sendMessage({ target: 'offscreen', type: 'tab-capture-start', session, streamId, startTime: from });
   if (!started?.ok) throw new Error(started?.error || "Chrome did not share this tab's audio.");
   return { state: 'running', duration: 0, paused: false, title: tab.title || '', url: tab.url || '', via: 'tab' };
 }
 
+// Many players live inside a frame — an embedded video, a course player, a news site's widget — and the
+// top page then holds no media element at all. The same capture runs in every frame the extension can
+// reach; only the first one that starts is kept, because two live captures would double the transcript.
+async function frameAudioStart(tab, session) {
+  let results = [];
+  try {
+    await chrome.scripting.executeScript({ target: { tabId: tab.id, allFrames: true }, files: ['audio.js'] });
+    results = await chrome.scripting.executeScript({ target: { tabId: tab.id, allFrames: true }, func: captureMediaAudio, args: [session] });
+  } catch (error) {
+    return { state: 'none', error: `No frame on this page could be read (${error?.message || 'no permission'}).` };
+  }
+  const running = results.find(entry => entry?.result?.state === 'running');
+  if (running?.result) {
+    for (const entry of results) {
+      if (entry.frameId === running.frameId || entry?.result?.state !== 'running') continue;
+      await chrome.scripting.executeScript({ target: { tabId: tab.id, frameIds: [entry.frameId] }, func: stopCapture, args: [session] }).catch(() => {});
+    }
+    return running.result;
+  }
+  const error = results.map(entry => entry?.result?.error).find(Boolean);
+  const currentTime = results.map(entry => Number(entry?.result?.currentTime) || 0).sort((a, b) => b - a)[0] || 0;
+  return { state: 'none', error: error ? `In its frame: ${error}` : '', frames: results.length, currentTime };
+}
+
+// Chrome shares a tab's audio only with an extension the person has just invoked on that tab, so the
+// last sentence is the one that actually fixes a refusal.
+function failureText(notes) {
+  const why = notes.filter(Boolean).join(' ');
+  const hint = "If the tab really is playing sound: put it in front, press Alt+Shift+M (or click the Mezze icon), then run /transcribe again — Chrome only shares a tab's audio with an extension you have just invoked on it.";
+  return `${why || 'Nothing on this page could be captured.'} ${hint}`;
+}
 function stopCapture(session) {
   const capture = window.__mezzeCapture;
   if (capture && (!session || capture.session === session)) capture.stop();
@@ -1469,16 +1501,28 @@ async function handle(message) {
     if (!session) throw new Error('Missing transcription session.');
     // The helpers go in as a file so the capture function can use them; the capture itself stays one
     // self-contained function because it runs inside the page.
-    await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['audio.js'] });
-    const [result] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: captureMediaAudio, args: [session] });
-    const page = result?.result || { state: 'none', error: 'The page did not answer.' };
-    if (page.state === 'running') return page;
-    // A page with no media element, or one whose element exposes no audio track, is not a dead end:
-    // Chrome can hand over the tab's own audio instead.
+    let page = { state: 'none', error: '' };
     try {
-      return await tabAudioStart(tab, session);
+      await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['audio.js'] });
+      const [result] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: captureMediaAudio, args: [session] });
+      page = result?.result || { state: 'none', error: 'The page did not answer.' };
     } catch (error) {
-      throw new Error([page.error, error?.message].filter(Boolean).join(' '));
+      // A page the extension cannot read is still worth trying the tab's own audio on.
+      page = { state: 'none', error: `This page could not be read (${error?.message || 'no permission'}).` };
+    }
+    if (page.state === 'running') return page;
+    // Anything else is not a dead end. The player may sit in a frame, and failing that Chrome can hand
+    // the whole tab's audio over. Each attempt keeps its own reason, so a total failure names all three
+    // instead of the last one.
+    const notes = [page.error].filter(Boolean);
+    const frames = await frameAudioStart(tab, session);
+    if (frames.state === 'running') return frames;
+    if (frames.error && !notes.includes(frames.error)) notes.push(frames.error);
+    try {
+      return await tabAudioStart(tab, session, frames.currentTime || page.currentTime);
+    } catch (error) {
+      if (error?.message) notes.push(error.message);
+      throw new Error(failureText(notes));
     }
   }
   if (message.type === 'capture-stop') {
