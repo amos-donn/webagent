@@ -35,9 +35,12 @@ function timed(promise, ms, message) {
 }
 let workflow = null, proposal = null, plan = [], chats = [], chat = null;
 let tabCache = [], actingTabId = null, contextIds = [];
-// There is no mode picker any more: every round runs on its own, and a risky-looking step is still
-// matched against the goal and announced in the timeline.
-let mode = 'autopilot', planMode = 'auto', lastShot = '', skills = [];
+// A posture of "auto" still runs on its own, but a risky-looking step is matched against the goal and
+// announced in the timeline; "risky" stops before those steps and "ask" stops before every round.
+// Approval posture: how much this run does without you. Stored and restored with the other settings,
+// because plan mode was and this was not, and two adjacent settings that disagree is a bug people
+// read as unreliability. Approval.modeFor turns it into the mode the round loop checks.
+let posture = 'auto', planMode = 'auto', lastShot = '', skills = [];
 // Recording state, saved macros, and the replay in flight. A replay is not a workflow: it has no
 // model, no plan and no retries — it either finds the control the recording named or it stops.
 let rec = null, macros = [], macroRun = null;
@@ -915,6 +918,9 @@ async function next(run, prefetched) {
     await runBatch(run);
   } else {
     $('approval').hidden = false; $('loading').hidden = true;
+    // Which posture stopped the run, said in the card: "needs your approval" on its own never made it
+    // clear whether this was the setting or the step.
+    $('approval-why').textContent = `${risky ? `Paused because ${risky}.` : Approval.whyFor(posture)} Approval: ${Approval.labelFor(posture).toLowerCase()}.`;
     notify(risky ? `Paused before this round because ${risky}. Approve to continue.` : 'Review the queued actions before they run.');
   }
 }
@@ -1118,7 +1124,7 @@ async function startWorkflow(goal, skill) {
   const chosen = skill || builtinFor(acting.url, goal);
   const history = chatHistory();
   chat.goal = goal; chat.title = goal.slice(0, 60);
-  workflow = { goal, skill: chosen || null, steps: [], mode, taskStart: Date.now(), chatId: chat.id, spent: null, history, paused: false, held: false, resume: null, actingTabId: acting.id, homeTabId: acting.id, contextIds: [...contextIds], opened: [], tokens: {}, tokenSeq: 0, stalled: 0, lastHash: '', queue: [], evidence: 0, unproven: 0, recovered: 0, retries: 0, apiRetries: 0, keepGoing: 0, allow: [new URL(acting.url).origin], memory: null, wantShot: false, contextTabs: [], warned: [] };  const run = workflow;
+  workflow = { goal, skill: chosen || null, steps: [], mode: Approval.modeFor(posture), taskStart: Date.now(), chatId: chat.id, spent: null, history, paused: false, held: false, resume: null, actingTabId: acting.id, homeTabId: acting.id, contextIds: [...contextIds], opened: [], tokens: {}, tokenSeq: 0, stalled: 0, lastHash: '', queue: [], evidence: 0, unproven: 0, recovered: 0, retries: 0, apiRetries: 0, keepGoing: 0, allow: [new URL(acting.url).origin], memory: null, wantShot: false, contextTabs: [], warned: [] };  const run = workflow;
   $('run-dot').hidden = false;
   plan = [];
   pushMessage('user', goal);
@@ -1618,10 +1624,19 @@ const COMMANDS = [
   { cmd: '/save', hint: 'Save the last transcript to the vault', run: () => saveTranscript().catch(e => notify(e.message || 'Could not save that transcript.', true)) },
   { cmd: '/every', hint: 'Run a task on a schedule, like /every 60 check the inbox', run: () => notify('Type it in the box: /every 60 <task>.') },
   { cmd: '/schedules', hint: 'List or cancel scheduled tasks', run: () => showSchedules().catch(() => {}) },
+  { cmd: '/approval', hint: 'How much the agent does without asking', run: () => notify(`Approval: ${Approval.labelFor(posture)}. ${Approval.whyFor(posture)}`) },
   { cmd: '/saw', hint: 'Show the screenshot behind the last step', run: () => openSaw() },
   { cmd: '/timings', hint: 'Open the speed panel', run: () => openTimings() },
   { cmd: '/stop', hint: 'Stop the running workflow', run: () => { stop(); notify('Workflow stopped.'); } }
 ];
+function setPosture(value) {
+  const wanted = Approval.read(value);
+  posture = wanted;
+  chrome.storage.local.set({ approval: posture }).catch(() => {});
+  if (workflow) workflow.mode = Approval.modeFor(posture);
+  $('approval-mode').value = posture;
+  notify(`Approval: ${Approval.labelFor(posture).toLowerCase()}. ${Approval.whyFor(posture)}`);
+}
 function setPlanMode(value) { planMode = value; chrome.storage.local.set({ planMode }); notify(value === 'always' ? 'Every task will get a checklist.' : value === 'never' ? 'Tasks will run without a checklist.' : 'The agent decides whether a checklist helps.'); }
 // Built-in skills. They are not stored with the distilled ones: they are matched from the page the
 // user is on, so "summarize this" on a Google doc needs no setup at all.
@@ -2154,6 +2169,14 @@ $('composer').addEventListener('submit', async event => {
   // through would run the interval as a goal.
   if (/^\/every\b/i.test(typed)) { event.preventDefault(); $('goal').value = ''; grow(); renderChips(); addScheduleFromText(typed).catch(error => notify(error.message || 'Could not schedule that.', true)); return; }
   if (/^\/schedules\b/i.test(typed)) { event.preventDefault(); $('goal').value = ''; grow(); renderChips(); showSchedules(typed).catch(() => {}); return; }
+  if (/^\/approval\b/i.test(typed)) {
+    event.preventDefault(); $('goal').value = ''; grow(); renderChips();
+    const arg = typed.replace(/^\/approval\s*/i, '').trim().toLowerCase();
+    if (!arg) notify(`Approval: ${Approval.labelFor(posture)}. Choose with /approval ask, /approval risky or /approval auto.`);
+    else if (Object.prototype.hasOwnProperty.call(Approval.MODES, arg)) setPosture(arg);
+    else notify('Try /approval ask, /approval risky or /approval auto.', true);
+    return;
+  }
   event.preventDefault();
   if (workflow || macroRun) return;
   if (rec) { notify('Save or cancel the recording first.', true); return; }
@@ -2200,6 +2223,7 @@ $('history-clear').addEventListener('click', async () => {
 });
 $('settings-btn').addEventListener('click', () => {
   $('plan-mode').value = planMode;
+  $('approval-mode').value = posture;
   renderSkills();
   if (!$('settings-dialog').open) $('settings-dialog').showModal();
 });
@@ -2208,6 +2232,16 @@ $('settings-dialog').addEventListener('click', event => { if (event.target === $
 $('history-dialog').addEventListener('click', event => { if (event.target === $('history-dialog')) $('history-dialog').close(); });
 $('saw-dialog').addEventListener('click', event => { if (event.target === $('saw-dialog')) $('saw-dialog').close(); });
 $('plan-clear').addEventListener('click', () => { if (workflow) return; plan = []; renderPlan(); schedulePersist(); });
+// One run, not a setting: "stop asking" for the remainder of this task without changing the posture
+// that every later run starts from.
+task('approve-all', async () => {
+  const run = workflow;
+  if (!run) throw new Error('Start a task first.');
+  run.mode = 'autopilot';
+  $('approval').hidden = true;
+  notify('Running the rest of this task without asking. The setting is unchanged.');
+  if (run.queue?.length) await runBatch(run);
+});
 task('approve', async () => { const run = workflow; if (!run) throw new Error('Start a task first.'); if (!run.queue?.length) throw new Error('Nothing queued — send a message to continue.'); if (run.queue[0]?.type === 'navigate') await permission(run.queue[0].url); if (workflow !== run) return; $('approval').hidden = true; await runBatch(run); });
 $('tabs-refresh').addEventListener('click', async () => { try { await listTabs(); } catch (e) { notify(e.message || 'Could not list tabs.', true); } });
 $('tabs-current').addEventListener('click', async () => { try { const [tab] = await chrome.tabs.query({ active: true, currentWindow: true }); if (!tab?.id) throw new Error('Select a webpage first.'); actingTabId = tab.id; contextIds = contextIds.filter(id => id !== tab.id); renderTabs(); await permission(tab.url); } catch (e) { notify(e.message || 'Something went wrong.', true); } });
@@ -2255,6 +2289,7 @@ $('stay-toggle').addEventListener('change', async () => {
 });
 // Plan mode lived only in /plan, /noplan and /auto-plan; the same three states belong in Settings.
 $('plan-mode').addEventListener('change', () => setPlanMode($('plan-mode').value));
+$('approval-mode').addEventListener('change', () => setPosture($('approval-mode').value));
 $('test-worker').addEventListener('click', testConnection);
 $('chat-title').addEventListener('click', openHistory);
 // Escape stops a run and Cmd/Ctrl+K jumps to the box, but a dialog owns Escape while it is open.
@@ -2299,7 +2334,7 @@ chrome.runtime.onMessage.addListener((message, sender) => {
 });
 
 (async () => {
-  const saved = await chrome.storage.local.get(['worker', 'chats', 'activeChat', 'planMode', 'lastShot', 'skills', 'bridge', 'pointer', 'speed', 'slowPages', 'stayPut', 'timings', 'macros']);
+  const saved = await chrome.storage.local.get(['worker', 'chats', 'activeChat', 'approval', 'planMode', 'lastShot', 'skills', 'bridge', 'pointer', 'speed', 'slowPages', 'stayPut', 'timings', 'macros']);
   macros = Array.isArray(saved.macros) ? saved.macros : [];
   $('worker').value = saved.worker || 'https://webagent.amos-donn.workers.dev';
   skills = Array.isArray(saved.skills) ? saved.skills : [];
@@ -2311,6 +2346,8 @@ chrome.runtime.onMessage.addListener((message, sender) => {
   $('slow-toggle').checked = slowPages;
   stayPut = saved.stayPut !== false;
   $('stay-toggle').checked = stayPut;
+  posture = Approval.read(saved.approval);
+  $('approval-mode').value = posture;
   planMode = ['auto', 'always', 'never'].includes(saved.planMode) ? saved.planMode : 'auto';
   $('plan-mode').value = planMode;
   lastShot = saved.lastShot || '';

@@ -472,3 +472,8 @@ dialog[open] { animation:pop .18s ease both }
   white-space:pre-wrap; word-break:break-word; font:11.5px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
   color:var(--ink-2); background:var(--surface-2);
 }
+
+/* approval posture: the card explains which setting stopped the run, and the one-time escape
+   hatch has to fit a panel that can be 320 px wide. */
+#approval-why { margin: 0 0 8px; }
+.approval-row { flex-wrap: wrap; }

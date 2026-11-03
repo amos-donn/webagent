@@ -332,3 +332,15 @@ Version 1.7.0 closes gaps 8, 13, 27, 28 and 31 from the list above, and does the
 Deliberately not done: `chrome.identity`. There is no OAuth client, no account in this design, and
 `getProfileUserInfo` would add an install-time permission warning to show an email address nobody asked
 for. It is a two-line change the day sync exists, and wrong before then.
+
+## Trust, step one (1.8.0)
+
+The approval posture is now a stored setting with three positions rather than a hardcoded `autopilot`
+with dead `auto` and `manual` branches behind it. That matters more than it sounds: until 1.8.0 the panel
+could not actually stop before a round, whatever the interface implied, because the mode the round loop
+checks was never anything but `autopilot`. Plan mode was remembered across reloads and approval was not,
+which is the half of the pair that made both feel unreliable.
+
+Still open from the trust list: a per-site allowlist with revoke and a record of what was granted (we ask
+for origins on demand and never show the total), sensitive-action gates that are a setting rather than a
+regex, hard URL boundaries, and the per-run cost meter.
