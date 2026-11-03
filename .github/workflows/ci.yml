@@ -1,0 +1,21 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Tests
+        run: node --test tests/
+      # The extension zip is tracked and installed by hand, so a stale one ships a different extension
+      # than the source in the same commit. Cloudflare Workers Builds only deploys the Worker.
+      - name: Extension zip matches extension/
+        run: node scripts/package.mjs --check

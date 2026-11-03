@@ -2271,6 +2271,13 @@ document.addEventListener('visibilitychange', () => { if (document.hidden && cha
 $('worker').addEventListener('change', async () => { await chrome.storage.local.set({ worker: $('worker').value.trim().replace(/\/$/, '') }); });
 $('bridge-toggle').addEventListener('change', async () => { try { const out = await send('bridge', { on: $('bridge-toggle').checked }); notify(out.connected ? 'Bridge on. Start node bridge/server.mjs to accept MCP clients.' : 'Bridge off.'); } catch (e) { notify(e.message || 'Could not toggle the bridge.', true); } });
 $('pointer-toggle').addEventListener('change', async () => { await chrome.storage.local.set({ pointer: $('pointer-toggle').checked }); notify($('pointer-toggle').checked ? 'Pointer on: a green arrow shows where the agent clicks.' : 'Pointer off.'); });
+$('input-mode').addEventListener('change', async () => {
+  const value = $('input-mode').value === 'scripted' ? 'scripted' : 'debugger';
+  await chrome.storage.local.set({ inputMode: value });
+  notify(value === 'scripted'
+    ? 'Input: page scripting. No debugging bar — some sites ignore it, and refs and generated writing still need the debugger.'
+    : 'Input: debugger. Trusted events, element refs and screenshots; Chrome shows its debugging bar while a run works.');
+});
 $('speed').addEventListener('change', async () => {
   const value = $('speed').value;
   speed = Object.prototype.hasOwnProperty.call(PACING, value) ? value : 'fast';
@@ -2334,7 +2341,7 @@ chrome.runtime.onMessage.addListener((message, sender) => {
 });
 
 (async () => {
-  const saved = await chrome.storage.local.get(['worker', 'chats', 'activeChat', 'approval', 'planMode', 'lastShot', 'skills', 'bridge', 'pointer', 'speed', 'slowPages', 'stayPut', 'timings', 'macros']);
+  const saved = await chrome.storage.local.get(['worker', 'chats', 'activeChat', 'approval', 'planMode', 'lastShot', 'skills', 'bridge', 'pointer', 'speed', 'inputMode', 'slowPages', 'stayPut', 'timings', 'macros']);
   macros = Array.isArray(saved.macros) ? saved.macros : [];
   $('worker').value = saved.worker || 'https://webagent.amos-donn.workers.dev';
   skills = Array.isArray(saved.skills) ? saved.skills : [];
@@ -2343,6 +2350,7 @@ chrome.runtime.onMessage.addListener((message, sender) => {
   speed = Object.prototype.hasOwnProperty.call(PACING, saved.speed) ? saved.speed : 'fast';
   slowPages = saved.slowPages === true;
   $('speed').value = speed;
+  $('input-mode').value = saved.inputMode === 'scripted' ? 'scripted' : 'debugger';
   $('slow-toggle').checked = slowPages;
   stayPut = saved.stayPut !== false;
   $('stay-toggle').checked = stayPut;

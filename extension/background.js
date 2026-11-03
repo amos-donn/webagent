@@ -1,4 +1,5 @@
-importScripts('schedule.js');
+importScripts('schedule.js', 'effect.js', 'pointer.js');
+const POINTER = Pointer.geometry();
 
 chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
 const clip = (value, max) => String(value ?? '').slice(0, max);
@@ -135,6 +136,14 @@ async function readPage(tabId) {
   return result;
 }
 async function shoot(tabId) {
+  if (await scriptedInput()) {
+    // Without the debugger the only capture available is the visible tab, so a run that stays on its
+    // own background tab photographs whatever the user is looking at. The setting says so.
+    const size = (await pageRun(tabId, () => ({ width: innerWidth, height: innerHeight }))) || { width: 1280, height: 800 };
+    const tab = await chrome.tabs.get(tabId);
+    const data = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'jpeg', quality: 65 });
+    return { image: String(data).replace(/^data:image\/[a-z]+;base64,/, ''), width: size.width, height: size.height };
+  }
   return debug(tabId, async target => {
     const metrics = await chrome.debugger.sendCommand(target, 'Page.getLayoutMetrics');
     const viewport = metrics.cssVisualViewport || metrics.visualViewport;
@@ -144,6 +153,9 @@ async function shoot(tabId) {
 }
 // Accessibility tree: the primary grounding channel. Refs are stable handles for semantic nodes.
 async function axSnapshot(tabId) {
+  // The accessibility tree is a CDP call, so scripted mode works from the element map and the page text
+  // alone: no refs, and therefore no off-screen or shadow-DOM targeting.
+  if (await scriptedInput()) return { refs: [], text: '' };
   return debug(tabId, async target => {
     let nodes = [];
     try {
@@ -202,6 +214,7 @@ async function healRef(tabId, ref) {
   return match?.backend || null;
 }
 async function refBox(tabId, ref, expectedUrl) {
+  if (await scriptedInput()) fail('NO_DEBUGGER', 'Element refs need the debugger. Use the element map’s coordinates, or switch Input to Debugger in Settings.');
   const stored = await loadRefs(tabId);
   if (!stored || !stored.refs?.[ref]) fail('STALE_REF', 'That element reference is stale. Read the page again.');
   if (expectedUrl && !samePage(stored.url, expectedUrl)) fail('PAGE_CHANGED', 'That page changed. Observe it again.');
@@ -399,7 +412,7 @@ async function typeKeys(target, text) {
 // The shape is a kite rather than a triangle because a triangle reads as "play"; the corners are
 // rounded by stroking the same path, so no hand-tuned bezier can drift. Presentation only; every call
 // degrades silently and none of it changes the input.
-function pointerMove(x, y) {
+function pointerMove(x, y, geo) {
   const id = 'webagent-pointer';
   let host = document.getElementById(id);
   if (!host) {
@@ -408,25 +421,20 @@ function pointerMove(x, y) {
     host.style.cssText = 'position:fixed;left:0;top:0;width:0;height:0;overflow:visible;pointer-events:none;z-index:2147483647';
     const root = host.attachShadow({ mode: 'open' });
     const style = document.createElement('style');
-    style.textContent = '.wrap{position:fixed;left:0;top:0;width:0;height:0;will-change:transform}'
-      + '.arrow{position:absolute;left:-3px;top:-1px;width:20px;height:20px;overflow:visible;opacity:0;transform-origin:3px 1px;filter:drop-shadow(0 2px 5px rgba(9,60,40,.34)) drop-shadow(0 0 4px rgba(21,122,82,.38))}'
-      + '.ring{position:absolute;left:-26px;top:-26px;width:52px;height:52px;border-radius:50%;border:2px solid rgba(21,122,82,.75);background:radial-gradient(circle,rgba(21,122,82,.24),rgba(21,122,82,0) 70%);opacity:0}';
+    style.textContent = geo.wrap + geo.ringCss + geo.arrow;
     const wrap = document.createElement('div');
     wrap.className = 'wrap';
     const ring = document.createElement('span');
     ring.className = 'ring';
-    // The 1.7.x arrow with its stem deleted: the same tip, vertical left edge and shallow inward curve
-    // on the lower edge, so it still reads as a cursor rather than a triangle. Nothing sticks out the
-    // back, which is what made the old one look like a mouse someone was holding. Corners are rounded
-    // by stroking the path (the emblem stroke is thicker than the white one), and the pressed-in scale
-    // pivots on the tip so a click never looks like a slide.
+    // Shape, offsets and pivot come from pointer.js, which the tests read too: the box is offset so the
+    // painted tip sits on the click point, and the press animation squashes around that same point.
     const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
     svg.setAttribute('class', 'arrow');
     svg.setAttribute('viewBox', '0 0 24 24');
     svg.setAttribute('aria-hidden', 'true');
-    for (const [paint, width] of [['#fff', 6], ['#157a52', 3.6]]) {
+    for (const [paint, width] of geo.strokes) {
       const shape = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-      shape.setAttribute('d', 'M5 3 L5 19.6 L9.4 15.4 L12.3 14.1 L18.8 13.6 Z');
+      shape.setAttribute('d', geo.path);
       shape.setAttribute('fill', paint);
       shape.setAttribute('stroke', paint);
       shape.setAttribute('stroke-width', String(width));
@@ -484,7 +492,7 @@ async function pointerEnabled() {
 let pointerTold = false;
 async function pointerTo(tabId, point) {
   try {
-    const [{ result: ms }] = await chrome.scripting.executeScript({ target: { tabId }, func: pointerMove, args: [point.x, point.y] });
+    const [{ result: ms }] = await chrome.scripting.executeScript({ target: { tabId }, func: pointerMove, args: [point.x, point.y, POINTER] });
     if (Number.isFinite(ms) && ms > 0) await sleep(Math.min(ms, 400));
   } catch {
     // Failing silently is why "I see no cursor" has no explanation. Say it once, then keep working.
@@ -518,13 +526,79 @@ async function clickElement(tabId, point) {
     return !!result;
   } catch { return false; }
 }
+// Runs in the page, in the isolated world, and pretends to be a mouse. Every listener the page has on
+// the element sees these, which is why it works on ordinary sites; a site that checks isTrusted does
+// not, and that is the honest limit of this engine.
+function pageScriptClick(x, y) {
+  const el = document.elementFromPoint(x, y);
+  if (!el) return false;
+  el.scrollIntoView?.({ block: 'center', inline: 'center' });
+  const base = { bubbles: true, cancelable: true, composed: true, clientX: x, clientY: y, button: 0, view: window };
+  const pointer = window.PointerEvent ? { ...base, pointerId: 1, pointerType: 'mouse', isPrimary: true } : base;
+  el.dispatchEvent(new MouseEvent('pointerdown', pointer));
+  el.dispatchEvent(new MouseEvent('mousedown', base));
+  el.focus?.({ preventScroll: true });
+  el.dispatchEvent(new MouseEvent('pointerup', pointer));
+  el.dispatchEvent(new MouseEvent('mouseup', base));
+  el.dispatchEvent(new MouseEvent('click', base));
+  return true;
+}
+// A framework field ignores a plain value assignment unless the native setter runs and the events
+// follow, so the value is set the way React and Vue both expect to see it.
+function pageScriptType(text) {
+  const el = document.activeElement;
+  if (!el || el === document.body) return { ok: false, kind: 'none' };
+  if (el.type === 'password') return { ok: false, kind: 'password' };
+  if (el.isContentEditable) {
+    el.focus();
+    const inserted = document.execCommand ? document.execCommand('insertText', false, text) : false;
+    if (!inserted) el.textContent = (el.textContent || '') + text;
+    el.dispatchEvent(new InputEvent('input', { bubbles: true, data: text, inputType: 'insertText' }));
+    return { ok: true, kind: 'editable', value: el.textContent || '' };
+  }
+  if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {
+    const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+    const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+    const next = String(el.value || '') + text;
+    if (setter) setter.call(el, next); else el.value = next;
+    el.dispatchEvent(new InputEvent('input', { bubbles: true, data: text, inputType: 'insertText' }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+    return { ok: true, kind: 'editable', value: el.value };
+  }
+  return { ok: false, kind: 'other' };
+}
+// Keys a person would press: Enter submits, Escape closes, and a shortcut carries its modifiers.
+function pageScriptKey(spec) {
+  const parts = String(spec || '').split('+').map(part => part.trim()).filter(Boolean);
+  if (!parts.length) return false;
+  const names = { ctrl: 'Control', control: 'Control', shift: 'Shift', alt: 'Alt', option: 'Alt', meta: 'Meta', cmd: 'Meta', command: 'Meta' };
+  const flags = { Control: false, Shift: false, Alt: false, Meta: false };
+  for (const part of parts.slice(0, -1)) { const name = names[part.toLowerCase()]; if (name) flags[name] = true; }
+  const raw = parts[parts.length - 1];
+  const named = { enter: 'Enter', escape: 'Escape', esc: 'Escape', tab: 'Tab', space: ' ', backspace: 'Backspace', delete: 'Delete', insert: 'Insert', home: 'Home', end: 'End', arrowup: 'ArrowUp', arrowdown: 'ArrowDown', arrowleft: 'ArrowLeft', arrowright: 'ArrowRight', pageup: 'PageUp', pagedown: 'PageDown' };
+  const key = named[raw.toLowerCase()] || raw;
+  const code = key === ' ' ? 'Space' : (/^[a-z]$/i.test(key) ? 'Key' + key.toUpperCase() : key);
+  const init = { key, code, bubbles: true, cancelable: true, composed: true, ...flags };
+  const target = document.activeElement || document.body;
+  target.dispatchEvent(new KeyboardEvent('keydown', init));
+  const commands = flags.Control || flags.Meta || flags.Alt;
+  if (key.length === 1 && !commands) {
+    const field = document.activeElement;
+    if (field && (field.isContentEditable || field.tagName === 'INPUT' || field.tagName === 'TEXTAREA') && document.execCommand) document.execCommand('insertText', false, key);
+  }
+  target.dispatchEvent(new KeyboardEvent('keyup', init));
+  return true;
+}
 /* ---------- macros: recording and locator replay ---------- */
 // A recorded step names its target by meaning — a role and a name, a label, a test id — with the
 // structural CSS path kept as a last resort. Everything below runs inside the page, so each function
 // is self-contained: Chrome serialises it, so it may not reference anything outside its own body.
 const RECORD_KEY = 'macro:rec';
-function locateTarget(target) {
-  if (!Array.isArray(target) || !target.length) return null;
+// One page-side DOM toolkit, installed per page and shared by replay, recording and the agent's own
+// lookups. It used to be two almost identical copies — a locator, and another inside the recorder — so
+// a fix to how a control is named only reached one of them. Chrome serialises an injected function, so
+// this stays self-contained and publishes its helpers on the page for the recorder to reuse.
+function pageDom(op, payload) {
   const INTERACTIVE = 'a[href],button,input:not([type=hidden]),select,textarea,summary,[role=button],[role=link],[role=tab],[role=checkbox],[role=radio],[role=menuitem],[role=combobox],[role=switch],[contenteditable=""],[contenteditable="true"]';
   const text = el => (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
   const nameOf = el => {
@@ -563,6 +637,7 @@ function locateTarget(target) {
     }
     return el.isContentEditable ? 'textbox' : 'generic';
   };
+  // The agent's own overlays are not page content, so they are never a target.
   const visible = el => {
     if (!el || el.nodeType !== 1 || el.closest?.('[id^="webagent-"]')) return false;
     const rect = el.getBoundingClientRect();
@@ -581,24 +656,73 @@ function locateTarget(target) {
     } catch { /* a selector the page has since made invalid is skipped, not fatal */ }
     return [];
   };
-  for (const candidate of target) {
-    const list = matches(candidate);
-    if (!list.length) continue;
-    const el = list[Math.min(candidate.nth || 0, list.length - 1)];
-    if (!el) continue;
-    el.scrollIntoView({ block: 'center', inline: 'center' });
-    const rect = el.getBoundingClientRect();
-    if (rect.width < 1 || rect.height < 1) continue;
-    return { x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2), via: candidate.k, count: list.length };
-  }
-  return null;
+  const cssPath = el => {
+    const parts = [];
+    for (let node = el; node && node.nodeType === 1 && parts.length < 6; node = node.parentElement) {
+      if (node.id && node.id.length < 50 && !/[0-9a-f]{8}|[0-9]{4,}/i.test(node.id)) { parts.unshift(`#${CSS.escape(node.id)}`); break; }
+      let part = node.tagName.toLowerCase();
+      const stable = [...(node.classList || [])].filter(name => name.length < 30 && !/\d{3,}|^(_|css-|sc-|jsx-|ng-)/.test(name)).slice(0, 2);
+      if (stable.length) part += `.${stable.map(name => CSS.escape(name)).join('.')}`;
+      const siblings = node.parentElement ? [...node.parentElement.children].filter(sibling => sibling.tagName === node.tagName) : [];
+      if (siblings.length > 1) part += `:nth-of-type(${siblings.indexOf(node) + 1})`;
+      parts.unshift(part);
+    }
+    return parts.join(' > ');
+  };
+  // Count the matches now, so replay can tell "the only Save button" from "the third one".
+  const candidatesFor = el => {
+    const out = [];
+    const add = (k, value, extra = {}) => {
+      const clean = String(value ?? '').replace(/\s+/g, ' ').trim();
+      if (!clean || clean.length > 200) return;
+      out.push({ k, value: clean, ...extra });
+    };
+    for (const attr of ['data-testid', 'data-test', 'data-qa', 'data-cy', 'data-test-id']) {
+      const value = el.getAttribute?.(attr);
+      if (value) { add('testid', value); break; }
+    }
+    const role = roleOf(el), name = nameOf(el);
+    if (role && role !== 'generic' && name) add('role', role, { name });
+    if (name) add('label', name);
+    const fieldName = el.getAttribute?.('name');
+    if (fieldName) add('name', fieldName);
+    const id = el.id;
+    if (id && id.length < 60 && !/[0-9a-f]{8}-|[0-9]{4,}/i.test(id) && document.querySelectorAll(`#${CSS.escape(id)}`).length === 1) add('id', id);
+    const own = text(el);
+    if (own && own.length <= 80) add('text', own);
+    add('css', cssPath(el));
+    return out.map(candidate => {
+      const list = matches(candidate);
+      return { ...candidate, count: list.length, nth: Math.max(0, list.indexOf(el)) };
+    });
+  };
+  const locate = target => {
+    if (!Array.isArray(target) || !target.length) return null;
+    for (const candidate of target) {
+      const list = matches(candidate);
+      if (!list.length) continue;
+      const el = list[Math.min(candidate.nth || 0, list.length - 1)];
+      if (!el) continue;
+      el.scrollIntoView({ block: 'center', inline: 'center' });
+      const rect = el.getBoundingClientRect();
+      if (rect.width < 1 || rect.height < 1) continue;
+      return { x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2), via: candidate.k, count: list.length };
+    }
+    return null;
+  };
+  window.__mezzeDom = { INTERACTIVE, text, nameOf, roleOf, visible, matches, cssPath, candidatesFor, locate };
+  return op === 'locate' ? locate(payload) : { installed: true };
+}
+// The recorder runs later, on the page's own events, so the toolkit is installed before it is injected.
+async function armDom(tabId) {
+  await chrome.scripting.executeScript({ target: { tabId }, func: pageDom, args: ['install'] }).catch(() => {});
 }
 // A step is a condition, not a sleep: wait for the target to exist, up to a budget, so a menu that
 // paints 800 ms late still plays back.
 async function targetBox(tabId, target, waitMs = 6000) {
   const deadline = Date.now() + Math.min(Math.max(Number(waitMs) || 6000, 500), 15000);
   for (;;) {
-    const frames = await chrome.scripting.executeScript({ target: { tabId }, func: locateTarget, args: [target] }).catch(() => []);
+    const frames = await chrome.scripting.executeScript({ target: { tabId }, func: pageDom, args: ['locate', target] }).catch(() => []);
     const result = frames?.[0]?.result;
     if (result && Number.isFinite(result.x) && Number.isFinite(result.y)) {
       const live = (await liveViewportSafe(tabId)) || { width: 1280, height: 800 };
@@ -632,104 +756,13 @@ function installRecorder(session) {
   try { previous?.stop?.(); } catch { /* an old recorder whose page is already gone */ }
 
   const send = event => { try { chrome.runtime.sendMessage({ type: 'macro-event', session, event }); } catch { /* extension reloaded */ } };
-  const text = el => (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
-  const INTERACTIVE = 'a[href],button,input:not([type=hidden]),select,textarea,summary,[role=button],[role=link],[role=tab],[role=checkbox],[role=radio],[role=menuitem],[role=combobox],[role=switch],[contenteditable=""],[contenteditable="true"]';
-  const SECRET = /(pass(word|code)?|passwd|otp|one[-_ ]?time|security[-_ ]?code|cvv|cvc|cc[-_ ]?(num|number|exp|csc|name)|card[-_ ]?number|ssn|social[-_ ]?security|iban|routing|\bpin\b)/i;
+  // The shared toolkit (armDom installs it before injection): recording and replay agree on how a
+  // control is named, matched and counted, because there is only one implementation of each.
+  const D = window.__mezzeDom;
+  if (!D) return false;
+  const { text, INTERACTIVE, nameOf, roleOf, visible, matches, cssPath, candidatesFor } = D;
   const harmless = el => !el || !el.closest?.('[id^="webagent-"]');
-  const nameOf = el => {
-    const attr = name => (el.getAttribute ? (el.getAttribute(name) || '') : '');
-    const aria = attr('aria-label').replace(/\s+/g, ' ').trim();
-    if (aria) return aria.slice(0, 120);
-    const by = attr('aria-labelledby');
-    if (by) {
-      const joined = by.split(/\s+/).map(id => document.getElementById(id)).filter(Boolean).map(text).join(' ').trim();
-      if (joined) return joined.slice(0, 120);
-    }
-    const wrap = el.closest ? el.closest('label') : null;
-    if (wrap && text(wrap)) return text(wrap).slice(0, 120);
-    if (el.id) { const label = document.querySelector(`label[for="${CSS.escape(el.id)}"]`); if (label && text(label)) return text(label).slice(0, 120); }
-    const placeholder = attr('placeholder');
-    if (placeholder) return placeholder.slice(0, 120);
-    const own = text(el);
-    if (own) return own.slice(0, 120);
-    return String(attr('name') || attr('title') || '').slice(0, 120);
-  };
-  const roleOf = el => {
-    const explicit = el.getAttribute ? el.getAttribute('role') : '';
-    if (explicit) return explicit.split(/\s+/)[0];
-    const tag = el.tagName;
-    if (tag === 'A') return el.hasAttribute('href') ? 'link' : 'generic';
-    if (tag === 'BUTTON' || tag === 'SUMMARY') return 'button';
-    if (tag === 'SELECT') return 'combobox';
-    if (tag === 'TEXTAREA') return 'textbox';
-    if (tag === 'INPUT') {
-      const type = (el.type || 'text').toLowerCase();
-      if (['submit', 'button', 'reset', 'image'].includes(type)) return 'button';
-      if (type === 'checkbox') return 'checkbox';
-      if (type === 'radio') return 'radio';
-      if (type === 'search') return 'searchbox';
-      return 'textbox';
-    }
-    return el.isContentEditable ? 'textbox' : 'generic';
-  };
-  const visible = el => {
-    if (!el || el.nodeType !== 1 || !harmless(el)) return false;
-    const rect = el.getBoundingClientRect();
-    if (rect.width < 1 || rect.height < 1) return false;
-    const style = getComputedStyle(el);
-    return style.visibility !== 'hidden' && style.display !== 'none' && Number(style.opacity || 1) > 0.05;
-  };
-  const matches = candidate => {
-    try {
-      if (candidate.k === 'testid') return [...document.querySelectorAll(`[data-testid="${CSS.escape(candidate.value)}"],[data-test="${CSS.escape(candidate.value)}"],[data-qa="${CSS.escape(candidate.value)}"],[data-cy="${CSS.escape(candidate.value)}"],[data-test-id="${CSS.escape(candidate.value)}"]`)].filter(visible);
-      if (candidate.k === 'id') return [...document.querySelectorAll(`#${CSS.escape(candidate.value)}`)].filter(visible);
-      if (candidate.k === 'name') return [...document.querySelectorAll(`[name="${CSS.escape(candidate.value)}"]`)].filter(visible);
-      if (candidate.k === 'css') return [...document.querySelectorAll(candidate.value)].filter(visible).slice(0, 60);
-      if (candidate.k === 'role') return [...document.querySelectorAll(INTERACTIVE)].filter(el => roleOf(el) === candidate.value && nameOf(el) === candidate.name && visible(el));
-      if (candidate.k === 'label' || candidate.k === 'text') return [...document.querySelectorAll(INTERACTIVE)].filter(el => nameOf(el) === candidate.value && visible(el)).slice(0, 60);
-    } catch { /* skip a strategy the page broke */ }
-    return [];
-  };
-  const cssPath = el => {
-    const parts = [];
-    for (let node = el; node && node.nodeType === 1 && parts.length < 6; node = node.parentElement) {
-      if (node.id && node.id.length < 50 && !/[0-9a-f]{8}|[0-9]{4,}/i.test(node.id)) { parts.unshift(`#${CSS.escape(node.id)}`); break; }
-      let part = node.tagName.toLowerCase();
-      const stable = [...(node.classList || [])].filter(name => name.length < 30 && !/\d{3,}|^(_|css-|sc-|jsx-|ng-)/.test(name)).slice(0, 2);
-      if (stable.length) part += `.${stable.map(name => CSS.escape(name)).join('.')}`;
-      const siblings = node.parentElement ? [...node.parentElement.children].filter(sibling => sibling.tagName === node.tagName) : [];
-      if (siblings.length > 1) part += `:nth-of-type(${siblings.indexOf(node) + 1})`;
-      parts.unshift(part);
-    }
-    return parts.join(' > ');
-  };
-  const candidatesFor = el => {
-    const out = [];
-    const add = (k, value, extra = {}) => {
-      const clean = String(value ?? '').replace(/\s+/g, ' ').trim();
-      if (!clean || clean.length > 200) return;
-      out.push({ k, value: clean, ...extra });
-    };
-    for (const attr of ['data-testid', 'data-test', 'data-qa', 'data-cy', 'data-test-id']) {
-      const value = el.getAttribute?.(attr);
-      if (value) { add('testid', value); break; }
-    }
-    const role = roleOf(el), name = nameOf(el);
-    if (role && role !== 'generic' && name) add('role', role, { name });
-    if (name) add('label', name);
-    const fieldName = el.getAttribute?.('name');
-    if (fieldName) add('name', fieldName);
-    const id = el.id;
-    if (id && id.length < 60 && !/[0-9a-f]{8}-|[0-9]{4,}/i.test(id) && document.querySelectorAll(`#${CSS.escape(id)}`).length === 1) add('id', id);
-    const own = text(el);
-    if (own && own.length <= 80) add('text', own);
-    add('css', cssPath(el));
-    // Count the matches now, so replay can tell "the only Save button" from "the third one".
-    return out.map(candidate => {
-      const list = matches(candidate);
-      return { ...candidate, count: list.length, nth: Math.max(0, list.indexOf(el)) };
-    });
-  };
+  const SECRET = /(pass(word|code)?|passwd|otp|one[-_ ]?time|security[-_ ]?code|cvv|cvc|cc[-_ ]?(num|number|exp|csc|name)|card[-_ ]?number|ssn|social[-_ ]?security|iban|routing|\bpin\b)/i;
   const isEditable = el => {
     if (!el || el.nodeType !== 1) return false;
     if (el.isContentEditable) return true;
@@ -989,11 +1022,13 @@ async function armRecorder(tabId) {
   const saved = (await chrome.storage.session.get(RECORD_KEY).catch(() => ({})))[RECORD_KEY];
   const tabIds = saved?.tabIds || (saved?.tabId ? [saved.tabId] : []);
   if (!tabIds.includes(tabId)) return false;
+  await armDom(tabId);
   await chrome.scripting.executeScript({ target: { tabId }, func: installRecorder, args: [saved.session] }).catch(() => {});
   return true;
 }
 
 async function clickType(tab, action, width, height) {
+  if (await scriptedInput()) return scriptedClickType(tab, action, width, height);
   return debug(tab.id, async target => {
     const live = await liveViewport(target);
     const point = scalePoint(action, width, height, live);
@@ -1023,6 +1058,44 @@ async function clickType(tab, action, width, height) {
     return { typed: 'insertText', typedOk: after.kind === 'editable' ? after.value === action.text : null };
   });
 }
+// Input has two engines. The debugger sends real, trusted events, exposes the accessibility tree and
+// takes screenshots — and Chrome shows its "started debugging this browser" bar for as long as a run
+// holds it. The scripted engine asks the page to click and type instead: no bar, nothing to grant, at
+// the cost of synthetic events, which some sites ignore. Opt-in, and refs and generated writing stay
+// debugger-only, because both are built on CDP.
+async function scriptedInput() {
+  const saved = await chrome.storage.local.get('inputMode').catch(() => ({}));
+  return saved.inputMode === 'scripted';
+}
+async function pageRun(tabId, func, args) {
+  const frames = await chrome.scripting.executeScript({ target: { tabId }, func, args }).catch(() => []);
+  return frames?.[0]?.result;
+}
+async function scriptedClickType(tab, action, width, height) {
+  const point = scalePoint(action, width, height, null);
+  if (await pointerEnabled()) await pointerTo(tab.id, point);
+  const hit = await pageRun(tab.id, pageScriptClick, [point.x, point.y]);
+  pointerClick(tab.id);
+  await sleep(120);
+  if (!hit) fail('NOT_ACTIONABLE', 'There is nothing clickable at that point any more. Read the page again.');
+  if (action.type !== 'type') return { via: 'script' };
+  const focused = await readEditable(tab.id);
+  if (focused.password) fail('PASSWORD_FIELD', 'Password and login fields are blocked.');
+  const typed = await pageRun(tab.id, pageScriptType, [action.text]);
+  if (!typed?.ok) {
+    if (typed?.kind === 'password') fail('PASSWORD_FIELD', 'Password and login fields are blocked.');
+    fail('NO_DEBUGGER', 'That field ignored synthetic typing. Switch Input to Debugger in Settings for this site.');
+  }
+  await sleep(150);
+  if (action.submit) { await sleep(150); await keyOn(tab.id, 'Enter'); }
+  return { via: 'script', typed: 'script', typedOk: typeof typed.value === 'string' ? typed.value === action.text : null };
+}
+// One way to press a key, whichever engine is running.
+async function keyOn(tabId, spec) {
+  if (!(await scriptedInput())) { await debug(tabId, target => pressKey(target, spec)); return; }
+  const done = await pageRun(tabId, pageScriptKey, [spec]);
+  if (!done) fail('UNSUPPORTED_KEY', `Unsupported key: ${clip(spec, 20)}.`);
+}
 async function workerBase() {
   const saved = await chrome.storage.local.get('worker').catch(() => ({}));
   return String(saved.worker || 'https://webagent.amos-donn.workers.dev').replace(/\/+$/, '');
@@ -1030,6 +1103,7 @@ async function workerBase() {
 // Gemini writes the text into the field: one request, streamed in as it arrives, with a purple
 // outline and skeleton over the target so the user can see which field is being written.
 async function writeInto(fresh, action, message) {
+  if (await scriptedInput()) fail('NO_DEBUGGER', 'Generated writing streams into the field through the debugger. Switch Input to Debugger in Settings, or ask the agent to type the text instead.');
   const before = await signature(fresh.id);
   const live = await liveViewportSafe(fresh.id);
   let point;
@@ -1104,8 +1178,8 @@ async function writeInto(fresh, action, message) {
     });
     if (!produced) fail('WRITE_FAILED', failure || 'Gemini returned no text for that field.');
     const after = await settle(fresh.id, before);
-    const verified = before && after ? before !== after : null;
-    return { generated: produced, via: 'stream', typed: outcome.editable ? 'generated' : 'keys', effect: { verified }, code: verified === false ? 'NO_EFFECT' : undefined };
+    const effect = Effect.of(before, after);
+    return { generated: produced, via: 'stream', typed: outcome.editable ? 'generated' : 'keys', effect, code: Effect.code(effect) };
   } finally {
     await chrome.scripting.executeScript({ target: { tabId: fresh.id }, func: writeBoxHide }).catch(() => {});
   }
@@ -1151,7 +1225,7 @@ async function actOnTab(fresh, action, message) {
       await sleep(120);
     }
     const after = await settle(fresh.id, before);
-    return { fields: results, effect: { verified: before && after ? before !== after : null }, notice: gate?.notice };
+    return { fields: results, effect: Effect.of(before, after), notice: gate?.notice };
   }
   if (action.type === 'write') {
     const outcome = await writeInto(fresh, action, message);
@@ -1165,7 +1239,8 @@ async function actOnTab(fresh, action, message) {
     const chosen = frames?.[0]?.result;
     if (!chosen?.ok) fail('NO_EFFECT', `That list no longer offers “${clip(action.value, 40)}”.`);
     const after = await settle(fresh.id, before);
-    return { selected: chosen.value, effect: { verified: before && after ? before !== after : true }, notice: gate?.notice };
+    const effect = Effect.of(before, after, true);
+    return { selected: chosen.value, effect, code: Effect.code(effect), notice: gate?.notice };
   }
   if (action.type === 'scroll') {
     if (!['up', 'down'].includes(action.direction)) throw new Error('Invalid scroll direction.');
@@ -1174,13 +1249,14 @@ async function actOnTab(fresh, action, message) {
     let via = 'pointer';
     if (before && after && before === after) {
       // Nested scrollers and keyboard-first pages ignore window.scrollBy, so fall back to the Space bar.
-      await debug(fresh.id, target => pressKey(target, action.direction === 'up' ? 'Shift+Space' : 'Space'));
+      await keyOn(fresh.id, action.direction === 'up' ? 'Shift+Space' : 'Space');
       const keyed = await settle(fresh.id, before);
       if (before && keyed && before !== keyed) { after = keyed; via = 'keyboard'; }
     }
-    return { via, effect: { verified: before && after ? before !== after : null }, code: before && after && before === after ? 'NO_EFFECT' : undefined, notice: gate?.notice };
+    const effect = Effect.of(before, after);
+    return { via, effect, code: Effect.code(effect), notice: gate?.notice };
   }
-  if (action.type === 'key') await debug(fresh.id, target => pressKey(target, action.key));
+  if (action.type === 'key') await keyOn(fresh.id, action.key);
   else if (['click', 'type'].includes(action.type)) {
     let point;
     if (action.target) {
@@ -1195,18 +1271,19 @@ async function actOnTab(fresh, action, message) {
     if (action.type === 'type' && (typeof action.text !== 'string' || action.text.length > 5000)) throw new Error('Invalid text.');
     const extra = await clickType(fresh, { ...action, x: point.x, y: point.y }, point.width, point.height);
     let after = await settle(fresh.id, before);
-    let verified = extra.verified !== undefined && extra.verified !== null ? extra.verified : (before && after ? before !== after : null);
+    let verified = extra.verified !== undefined && extra.verified !== null ? extra.verified : Effect.of(before, after).verified;
     if (extra.typedOk === true) verified = true;
     let fallback = false;
     if (action.type === 'click' && verified === false) {
       fallback = await clickElement(fresh.id, { x: point.x, y: point.y });
       after = await settle(fresh.id, before);
-      verified = before && after ? before !== after : null;
+      verified = Effect.of(before, after).verified;
     }
-    return { ...extra, fallback, effect: { verified }, code: verified === false ? 'NO_EFFECT' : undefined, notice: gate?.notice };
+    return { ...extra, fallback, effect: { verified }, code: Effect.code({ verified }), notice: gate?.notice };
   } else throw new Error('Unknown action.');
   const after = await settle(fresh.id, before);
-  return { effect: { verified: before && after ? before !== after : null }, code: before && after && before === after ? 'NO_EFFECT' : undefined, notice: gate?.notice };
+  const effect = Effect.of(before, after);
+  return { effect, code: Effect.code(effect), notice: gate?.notice };
 }
 let bridgeSocket = null;
 // The service worker dials a loopback bridge when the user enables it, so other agents can drive the tab.
@@ -1272,6 +1349,7 @@ async function handle(message) {
     const session = String(message.session || '');
     if (!session) throw new Error('Missing recording session.');
     await chrome.storage.session.set({ [RECORD_KEY]: { session, tabId: tab.id, tabIds: [tab.id], startUrl: tab.url, at: Date.now() } });
+    await armDom(tab.id);
     await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: installRecorder, args: [session] });
     return { session, tabId: tab.id, url: tab.url };
   }
@@ -1285,6 +1363,7 @@ async function handle(message) {
     if (!permitted(tab.url)) throw new Error('That page cannot be recorded.');
     const tabIds = [...new Set([...(saved.tabIds || [saved.tabId]).filter(Boolean), tab.id])].slice(-12);
     await chrome.storage.session.set({ [RECORD_KEY]: { ...saved, tabIds } });
+    await armDom(tab.id);
     await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: installRecorder, args: [saved.session] });
     return { tabId: tab.id, armed: tabIds.length };
   }
