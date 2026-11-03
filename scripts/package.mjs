@@ -16,6 +16,18 @@ const output = join(root, 'dist', 'mezze-extension.zip');
 const checking = process.argv.includes('--check');
 const SKIP = new Set(['.DS_Store', 'Thumbs.db']);
 
+// zip and unzip are not on every machine, and a raw ENOENT from a child process reads like a bug in
+// this script rather than a missing tool.
+function run(bin, args, options) {
+  try {
+    return execFileSync(bin, args, options);
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+    console.error(bin + ' is not installed — on Debian/Ubuntu: sudo apt-get install -y zip unzip');
+    process.exit(1);
+  }
+}
+
 function walk(dir, base = dir, out = []) {
   for (const entry of readdirSync(dir)) {
     if (SKIP.has(entry)) continue;
@@ -28,16 +40,16 @@ function walk(dir, base = dir, out = []) {
 
 function zip(target) {
   rmSync(target, { force: true });
-  execFileSync('zip', ['-qr', target, '.'], { cwd: source });
+  run('zip', ['-qr', target, '.'], { cwd: source });
 }
 
 function entries(archive) {
-  const list = execFileSync('unzip', ['-Z1', archive]).toString().split('\n').map(line => line.trim()).filter(Boolean);
+  const list = run('unzip', ['-Z1', archive]).toString().split('\n').map(line => line.trim()).filter(Boolean);
   return list.filter(name => !name.endsWith('/'));
 }
 
 function content(archive, name) {
-  return execFileSync('unzip', ['-p', archive, name], { cwd: undefined, maxBuffer: 64 * 1024 * 1024 });
+  return run('unzip', ['-p', archive, name], { cwd: undefined, maxBuffer: 64 * 1024 * 1024 });
 }
 
 const files = walk(source);

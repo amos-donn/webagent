@@ -6,7 +6,27 @@ The extension is **Mezze**. The Worker, its D1 database and the bound hostname k
 
 ## Install the extension
 
-Download [dist/mezze-extension.zip](dist/mezze-extension.zip), unzip it, open `chrome://extensions`, enable **Developer mode**, and choose **Load unpacked** with the extracted folder. Pin the extension and click its icon to open the side panel. This is an unpacked developer build, not a Chrome Web Store publication. For a new ZIP after editing, run `node scripts/package.mjs`. It rebuilds the archive from empty and compares every entry against `extension/`, because `zip -r` appends to an archive that already exists and silently doubles it. CI runs the same script with `--check` alongside the test suite, so a zip that no longer matches the source fails the build instead of shipping.
+Download [dist/mezze-extension.zip](dist/mezze-extension.zip), unzip it, open `chrome://extensions`, enable **Developer mode**, and choose **Load unpacked** with the extracted folder. Pin the extension and click its icon to open the side panel. This is an unpacked developer build, not a Chrome Web Store publication; install `dist/mezze.crx` instead if you want the extension to update itself from a push — see **Updating without the Web Store** below. For a new ZIP after editing, run `node scripts/package.mjs`. It rebuilds the archive from empty and compares every entry against `extension/`, because `zip -r` appends to an archive that already exists and silently doubles it. CI runs the same script with `--check` alongside the test suite, so a zip that no longer matches the source fails the build instead of shipping.
+
+## Updating without the Web Store
+
+A push to `main` is the release. [.github/workflows/release.yml](.github/workflows/release.yml) runs the tests, rebuilds the zip from `extension/`, signs a Chrome package, and attaches all three to the `v<version>` tag — so `releases/latest/download/mezze-extension.zip`, `mezze.crx` and `updates.xml` are stable URLs that mean the newest release, not a commit.
+
+Two installs, two kinds of update.
+
+**A CRX install updates itself, silently.** `extension/manifest.json` carries an `update_url` pointing at the latest `updates.xml`, so Chrome's own updater checks that feed every few hours, compares the version it finds with the installed one, and replaces the extension in place — the same mechanism the Web Store uses, self-hosted. Install the package once by dragging `mezze.crx` onto `chrome://extensions` with Developer mode on; after that a push to `main` reaches your browser without you touching anything. That is the off-store path and Chrome guards it: it works as-is on Linux and in Chromium builds, and on Windows and macOS Chrome refuses off-store installs unless the machine allows them (the enterprise policies `ExtensionInstallAllowlist` and `ExtensionInstallSources`, the `--enable-easy-off-store-extension-install` flag, or Chrome for Testing). The zip never has this problem.
+
+**An unpacked install is told, not replaced.** Chrome does not re-read an unpacked folder, so nothing can update it behind your back. Settings shows the version you are on and reads the same feed; when a newer release exists the row says so and the button becomes **Download the new build**, which opens the zip asset. Unzip it over the folder you loaded, then press **Reload extension** beside it. Mezze checks when the panel opens and every six hours. If the feed cannot be read — offline, or site access not granted yet, which is what a cross-origin fetch from the extension also needs — the row says that instead of claiming you are up to date.
+
+The extension id is derived from the signing key, so every release has to be signed by the same one: a new key is a different extension that cannot update the installed one. Generate it once and keep it out of git (`*.pem` is ignored):
+
+```
+node scripts/crx.mjs --generate-key=dist/mezze-key.pem
+```
+
+Then add that file's contents as the repository secret `CRX_PRIVATE_KEY` (Settings → Secrets and variables → Actions → New repository secret). Without it the release still publishes the zip and logs a warning; only the CRX and `updates.xml` are skipped, and the panel reports that the feed could not be read. `node scripts/crx.mjs --verify=dist/mezze.crx` takes a package apart and checks its signature and id, which is all the checking possible without a browser to install it in — the installation itself is the one step in this path that only a real Chrome can confirm.
+
+Bump `extension/manifest.json` for anything you want to ship: the tag comes from that version, so an unchanged version updates an existing release rather than creating a new one.
 
 The default Worker is `https://webagent.amos-donn.workers.dev`. Select a page, enter an objective, and start; Mezze writes a plan first and checks items off as it works. No accounts or sign-in. The extension requests Chrome site access as needed. Autopilot may pause when it meets an origin that has not been granted yet; select Continue to grant access. In review mode, check the proposed text, destination and screenshot marker before approving. With Autopilot on, actions run immediately and may be wrong; use it only when you accept that risk. A page can change after observation, and visual coordinates can be wrong; never approve an action without checking. If a click opens a new tab, select that tab before continuing. The agent does not automatically handle CAPTCHAs, authentication, payment details, downloads, or restricted pages.
 
@@ -222,6 +242,6 @@ One round record is written per decision and one task record per run, capped at 
 
 **Skills.** `/skill` distils the current run into a named, parameterised skill (secrets listed as parameters, values never stored) and `/` lists saved skills to replay. One skill ships built in: **Summarize with Gemini**. On a Google page — Docs, Drive, Sheets, Slides, Gmail or Search — a purple pill appears inside the message box, and typing anything with *summarize*, *tl;dr*, *key points* or *recap* in it attaches the skill automatically, so "summarize this" needs no setup. The skill tells the agent to read the page, answer with its `done` summary and leave the document untouched; the result lands in the chat report.
 
-**Evals.** `node evals/run.mjs --validate` checks the 30-task rubric suite; grading exported chats gives pass@3.
+**Evals.** `node evals/run.mjs --validate` checks the 30-task rubric suite; grading exported chats gives pass@3. CI runs the validator on every push, so a rubric that stops validating fails the build.
 
 **MCP bridge.** Enable **Local bridge** in Settings, run `node bridge/server.mjs`, then point any MCP client at `node mcp/server.mjs` to drive the tab with `browser_observe`, `browser_click`, `browser_type`, `browser_fill`, `browser_key`, `browser_scroll`, `browser_navigate`, `browser_read` and `browser_screenshot`. The bridge binds loopback only and rejects requests carrying a web Origin. Neither piece needs an account or a key.

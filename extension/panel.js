@@ -34,6 +34,7 @@ function timed(promise, ms, message) {
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 let workflow = null, proposal = null, plan = [], chats = [], chat = null;
+let updateState = null;
 let tabCache = [], actingTabId = null, contextIds = [];
 // A posture of "auto" still runs on its own, but a risky-looking step is matched against the goal and
 // announced in the timeline; "risky" stops before those steps and "ask" stops before every round.
@@ -251,6 +252,35 @@ function notify(text, error = false) {
   box.textContent = text;
   box.classList.toggle('error', error);
   box.hidden = false;
+}
+// A CRX install updates itself through the manifest's update_url, but an unpacked one never does:
+// Chrome does not re-read the folder. So the panel reads the same feed and turns it into two buttons —
+// open the new zip, and reload once you have replaced the files.
+const UPDATE_INTERVAL = 6 * 60 * 60 * 1000;
+async function checkUpdate(quiet = false) {
+  const current = chrome.runtime.getManifest().version;
+  const status = $('update-status');
+  $('update-line').textContent = 'Mezze ' + current;
+  try {
+    const res = await fetch(Update.FEED_URL + '?t=' + Date.now(), { cache: 'no-store', signal: AbortSignal.timeout(10000) });
+    if (!res.ok) throw new Error('the feed answered ' + res.status);
+    const feed = Update.parse(await res.text());
+    if (!feed) throw new Error('the feed is not readable');
+    updateState = { version: feed.version, current, newer: Update.newer(feed.version, current) };
+    $('check-update').textContent = updateState.newer ? 'Download ' + feed.version : 'Check for updates';
+    $('reload-extension').hidden = !updateState.newer;
+    status.hidden = false;
+    status.textContent = updateState.newer
+      ? feed.version + ' is available — you have ' + current + '. Download it, unzip it over the folder you loaded, then press Reload extension.'
+      : 'Up to date — ' + current + ' is the newest release.';
+    if (updateState.newer && !quiet) notify('Mezze ' + feed.version + ' is available. Settings → Check for updates to download it.');
+  } catch (error) {
+    updateState = null;
+    $('check-update').textContent = 'Check for updates';
+    $('reload-extension').hidden = true;
+    status.hidden = false;
+    status.textContent = 'Could not check for updates: ' + error.message + '. The feed is public, so this is usually the network or a site-access grant that has not been given yet.';
+  }
 }
 function baseUrl() { const url = new URL($('worker').value.trim()); if (url.username || url.password || url.search || url.hash || (url.protocol !== 'https:' && !(url.protocol === 'http:' && ['localhost','127.0.0.1'].includes(url.hostname)))) throw new Error('Use an HTTPS Worker URL or localhost.'); return url.origin + url.pathname.replace(/\/$/, ''); }
 // Ask once for every site, not once per site: Chrome remembers this grant until you revoke it.
@@ -2271,6 +2301,17 @@ document.addEventListener('visibilitychange', () => { if (document.hidden && cha
 $('worker').addEventListener('change', async () => { await chrome.storage.local.set({ worker: $('worker').value.trim().replace(/\/$/, '') }); });
 $('bridge-toggle').addEventListener('change', async () => { try { const out = await send('bridge', { on: $('bridge-toggle').checked }); notify(out.connected ? 'Bridge on. Start node bridge/server.mjs to accept MCP clients.' : 'Bridge off.'); } catch (e) { notify(e.message || 'Could not toggle the bridge.', true); } });
 $('pointer-toggle').addEventListener('change', async () => { await chrome.storage.local.set({ pointer: $('pointer-toggle').checked }); notify($('pointer-toggle').checked ? 'Pointer on: a green arrow shows where the agent clicks.' : 'Pointer off.'); });
+$('check-update').addEventListener('click', async () => {
+  if (updateState?.newer) {
+    chrome.tabs.create({ url: Update.ZIP_URL });
+    notify('Downloading ' + updateState.version + '. Unzip it over the folder you loaded, then press Reload extension.');
+    return;
+  }
+  $('check-update').disabled = true;
+  await checkUpdate();
+  $('check-update').disabled = false;
+});
+$('reload-extension').addEventListener('click', () => chrome.runtime.reload());
 $('input-mode').addEventListener('change', async () => {
   const value = $('input-mode').value === 'scripted' ? 'scripted' : 'debugger';
   await chrome.storage.local.set({ inputMode: value });
@@ -2379,5 +2420,7 @@ chrome.runtime.onMessage.addListener((message, sender) => {
     renderChips();
     notify(pending.site ? 'A request from the page menu is in the box — press send.' : 'A shortcut request is in the box — press send.');
   }
+  checkUpdate(true).catch(() => {});
+  setInterval(() => checkUpdate(true).catch(() => {}), UPDATE_INTERVAL);
   await autorun();
 })();

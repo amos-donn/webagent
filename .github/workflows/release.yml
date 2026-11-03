@@ -1,0 +1,77 @@
+name: Release
+
+# A push to main is the release. There is no Web Store listing, so this builds the two artifacts that
+# make updates possible: the zip an unpacked install replaces by hand, and the signed CRX plus update
+# feed that Chrome's own updater reads for a CRX install. Both are attached to a version tag, and
+# releases/latest/download/<file> is a stable URL for them, which is what the manifest points at.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # Nothing is published from a tree that does not pass its own checks.
+      - name: Tests
+        run: node --test tests/
+      - name: Evals rubric
+        run: node evals/run.mjs --validate
+      - name: Rebuild the extension zip from extension/
+        run: node scripts/package.mjs
+
+      - name: Read the version
+        id: version
+        run: echo "value=$(node -p "require('./extension/manifest.json').version")" >> "$GITHUB_OUTPUT"
+
+      # Without the key this logs a warning and skips the CRX rather than signing with a throwaway key:
+      # the extension id comes from the key, so a new key would be a different extension that cannot
+      # update an installed one. The zip still ships.
+      - name: Sign the Chrome package
+        env:
+          CRX_PRIVATE_KEY: ${{ secrets.CRX_PRIVATE_KEY }}
+        run: node scripts/crx.mjs --codebase="https://github.com/${{ github.repository }}/releases/latest/download/mezze.crx"
+
+      # A package that exists but does not verify has to fail the release, not be published with a shrug.
+      - name: Verify what was signed
+        run: |
+          if [ -f dist/mezze.crx ]; then
+            node scripts/crx.mjs --verify=dist/mezze.crx
+          else
+            echo "::warning::no CRX — add the CRX_PRIVATE_KEY secret to publish a self-updating build"
+          fi
+
+      - name: Collect assets
+        run: |
+          mkdir -p release
+          cp dist/mezze-extension.zip release/
+          for file in dist/mezze.crx dist/updates.xml; do [ -f "$file" ] && cp "$file" release/; done
+          ls -l release
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.value }}
+          name: Mezze ${{ steps.version.outputs.value }}
+          body: |
+            Built from ${{ github.sha }}.
+
+            **Unpacked:** download `mezze-extension.zip`, unzip it over your extension folder, then press
+            **Reload extension** in Settings (Mezze checks for this by itself).
+
+            **CRX:** `mezze.crx` and `updates.xml` make Chrome update the extension on its own. Install the
+            CRX once; after that the `update_url` in the manifest points here.
+          files: release/*
+          fail_on_unmatched_files: true
+          generate_release_notes: true

@@ -15,6 +15,9 @@ jobs:
           node-version: 22
       - name: Tests
         run: node --test tests/
+      # The rubric suite is data, so it drifts silently: 30 tasks, 91 points.
+      - name: Evals rubric
+        run: node evals/run.mjs --validate
       # The extension zip is tracked and installed by hand, so a stale one ships a different extension
       # than the source in the same commit. Cloudflare Workers Builds only deploys the Worker.
       - name: Extension zip matches extension/

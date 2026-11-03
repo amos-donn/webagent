@@ -1,0 +1,16 @@
+node_modules/
+.DS_Store
+Thumbs.db
+
+# Secrets and signing keys never belong in the tree. dist/mezze-key.pem signs every release, and
+# publishing it would let anyone ship an update that Chrome installs without asking.
+.env
+.env.*
+!.env.example
+*.pem
+
+# Build output that CI regenerates: dist/mezze-extension.zip stays tracked because it is what people
+# install, but the signed package belongs to a release, not to a commit.
+dist/mezze.crx
+dist/updates.xml
+dist/.check-*.zip
