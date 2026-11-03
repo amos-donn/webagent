@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
+import { readFileSync } from 'node:fs';
 
 const require = createRequire(import.meta.url);
 const Update = require('../extension/update.js');
@@ -47,7 +48,17 @@ test('a feed over http, without a version, or not a feed at all is rejected', ()
   assert.equal(Update.parse("<updatecheck codebase='https://x/y.crx' version='latest'/>"), null);
 });
 
+test('the feed the panel reads is the feed the manifest points Chrome at', () => {
+  // Two literals for one URL: the panel's copy and the manifest's. If they drift, the panel checks a
+  // feed that Chrome does not use (or the reverse) and both keep reporting success.
+  const manifest = JSON.parse(readFileSync(new URL('../extension/manifest.json', import.meta.url), 'utf8'));
+  assert.equal(manifest.update_url, Update.FEED_URL);
+  assert.match(manifest.version, /^\d+\.\d+\.\d+$/, 'the release tag is built from this string');
+});
+
 test('both stable links point at the latest release', () => {
   assert.match(Update.FEED_URL, /^https:\/\/github\.com\/amos-donn\/webagent\/releases\/latest\/download\/updates\.xml$/);
   assert.match(Update.ZIP_URL, /releases\/latest\/download\/mezze-extension\.zip$/);
+  // One release, three files, so the archive and the feed must sit on the same path.
+  assert.equal(Update.FEED_URL.replace(/[^/]+$/, ''), Update.ZIP_URL.replace(/[^/]+$/, ''));
 });

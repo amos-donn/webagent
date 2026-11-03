@@ -7,6 +7,9 @@ Thumbs.db
 .env
 .env.*
 !.env.example
+# Wrangler's own secrets file: same risk as .env, and it is not called .env.
+.dev.vars
+.dev.vars.*
 *.pem
 
 # Build output that CI regenerates: dist/mezze-extension.zip stays tracked because it is what people

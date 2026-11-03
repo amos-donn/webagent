@@ -8,7 +8,6 @@ const VERBS = {
   transcribe: ['Transcribing audio', 'Transcribed audio'],
   scroll: ['Scrolling', 'Scrolled'], wait: ['Waiting', 'Waited'],
   navigate: ['Opening the page', 'Opened the page'], key: ['Pressing a key', 'Pressed a key'],
-  switch: ['Switching tabs', 'Switched tabs'],
   switch: ['Switching tabs', 'Switched tabs'], open: ['Opening a new page', 'Opened a new page'],
   gather: ['Reading tabs', 'Read the tabs'], close: ['Closing the tab', 'Closed the tab'],
   select: ['Choosing an option', 'Chose an option'], inspect: ['Looking at the page', 'Looked at the page']
