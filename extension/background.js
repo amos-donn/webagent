@@ -1518,6 +1518,19 @@ async function handle(message) {
   throw new Error('Unknown action.');
 }
 // Painted by a serialised function, so this wrapper may only touch the page it runs in.
+// A notification reaches the user when there is no panel to write into: a scheduled run, or a
+// rail click with the side panel closed.
+async function notifyDone(title, message) {
+  if (!chrome.notifications?.create) return { shown: false };
+  await chrome.notifications.create('mezze-' + Date.now(), {
+    type: 'basic',
+    iconUrl: 'icon128.png',
+    title: String(title || 'Mezze').slice(0, 60),
+    message: String(message || '').slice(0, 200)
+  }).catch(() => {});
+  return { shown: true };
+}
+
 function paintRail(entries) {
   try { window.MezzeRail?.render(entries); return true; } catch { return false; }
 }
