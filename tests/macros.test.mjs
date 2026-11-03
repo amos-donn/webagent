@@ -162,3 +162,28 @@ test('a page is recognised by address, ignoring the fragment and a trailing slas
   assert.notEqual(Macros.pageKey('https://example.com/a'), Macros.pageKey('https://other.example/a'));
   assert.equal(Macros.pageKey('not a url'), '');
 });
+
+
+// The page rail is small enough to pin with a test: pinned and runnable only, one letter each, capped.
+import { createRequire as railCreateRequire } from 'node:module';
+const railApi = railCreateRequire(import.meta.url)('../extension/macros.js');
+
+test('the page rail lists only pinned, runnable macros', () => {
+  const list = railApi.rail([
+    { id: 'a', name: 'Invoice run', pinned: true, steps: [{ type: 'click' }] },
+    { id: 'b', name: 'Not pinned', steps: [{ type: 'click' }] },
+    { id: 'c', name: 'Nothing recorded', pinned: true, steps: [] },
+    { id: 'd', name: '  weekly report ', pinned: true, steps: [{ type: 'key' }] },
+    { id: '', name: 'No id', pinned: true, steps: [{ type: 'key' }] },
+    null
+  ]);
+  assert.deepEqual(list.map(entry => entry.id), ['a', 'd']);
+  assert.deepEqual(list.map(entry => entry.letter), ['I', 'W']);
+  assert.equal(list[1].name, 'weekly report');
+});
+
+test('the page rail stops at eight icons', () => {
+  const many = Array.from({ length: 12 }, (_, index) => ({ id: 'm' + index, name: 'Macro ' + index, pinned: true, steps: [{ type: 'key' }] }));
+  assert.equal(railApi.rail(many).length, 8);
+  assert.deepEqual(railApi.rail('not a list'), []);
+});

@@ -1315,48 +1315,77 @@ async function onTranscribeEvent(event) {
   if (event.event === 'done') { run.done = true; run.seconds = Number(event.seconds) || run.seconds; pumpTranscribe(); }
 }
 
-// Slices are transcribed one at a time, in order: a queue keeps the transcript chronological when
-// Gemini answers faster than the video plays, and one failure stops the run rather than piling up.
+// Three slices in flight instead of one. Speech arrives in real time, so a ten-second request that
+// takes longer than ten seconds to come back never catches up with the video; a small pool keeps the
+// transcript level with the audio. Answers are released in part order, because a transcript that jumps
+// around is worse than one that arrives a few seconds late.
+const SLICES_IN_FLIGHT = 3;
+
+function startSlice(run, job) {
+  run.inflight = (run.inflight || 0) + 1;
+  api('/transcribe', { audio: job.audio, mimeType: job.mimeType, part: job.part, seconds: job.seconds })
+    .then(out => {
+      if (transcribeRun !== run) return;
+      run.results = run.results || new Map();
+      run.results.set(job.part, {
+        from: Number.isFinite(job.from) ? job.from : (job.part - 1) * MezzeAudio.SLICE,
+        to: Number.isFinite(job.to) ? job.to : job.part * MezzeAudio.SLICE,
+        text: String(out?.text || '').trim()
+      });
+      releaseSlices(run);
+    })
+    .catch(e => {
+      if (transcribeRun !== run) return;
+      run.error = e?.message || 'Transcription stopped.';
+      stopTranscribe().catch(() => {});
+    })
+    .finally(() => {
+      if (transcribeRun !== run) return;
+      run.inflight = Math.max(0, (run.inflight || 0) - 1);
+    });
+}
+
+// A line joins the transcript only once every earlier slice has answered, so the island can light the
+// line being spoken without the text rearranging itself behind the video.
+function releaseSlices(run) {
+  run.next = run.next || 1;
+  while (run.results && run.results.has(run.next)) {
+    const line = run.results.get(run.next);
+    run.results.delete(run.next);
+    run.next += 1;
+    if (!line.text) continue;
+    run.text.push(line.text);
+    run.lines.push(line);
+    saveScript(run.tabId, { title: run.title, url: run.url, lines: run.lines });
+    send('player-line', { tabId: run.tabId, line, title: run.title }).catch(() => {});
+  }
+  renderTranscribe();
+}
+
 async function pumpTranscribe() {
   const run = transcribeRun;
-  if (!run || run.busy) return;
-  run.busy = true;
+  if (!run || run.pumping) return;
+  run.pumping = true;
   try {
-    while (transcribeRun === run) {
-      if (!run.queue.length) { if (run.done) await finishTranscribe(); return; }
-      const job = run.queue.shift();
-      run.parts = Math.max(run.parts, job.part);
-      currentAction(`Transcribing ${MezzeAudio.stamp(job.seconds)}`);
-      const out = await api('/transcribe', { audio: job.audio, mimeType: job.mimeType, part: job.part, seconds: job.seconds });
-      if (out?.text) {
-        run.text = [...run.text, out.text];
-        // The slice knows the media time it covers, which is what lets the island light the right line
-        // while the video is still playing instead of only at the end.
-        const line = {
-          from: Number.isFinite(job.from) ? job.from : (job.part - 1) * MezzeAudio.SLICE,
-          to: Number.isFinite(job.to) ? job.to : job.part * MezzeAudio.SLICE,
-          text: out.text
-        };
-        run.lines.push(line);
-        saveScript(run.tabId, { title: run.title, url: run.url, lines: run.lines });
-        send('player-line', { tabId: run.tabId, line, title: run.title }).catch(() => {});
+    for (;;) {
+      if (transcribeRun !== run) return;
+      if (!run.queue.length && !run.inflight) {
+        if (run.done) await finishTranscribe();
+        return;
       }
-      renderTranscribe();
+      while ((run.inflight || 0) < SLICES_IN_FLIGHT && run.queue.length) {
+        const job = run.queue.shift();
+        run.parts = Math.max(run.parts, job.part);
+        currentAction('Transcribing ' + MezzeAudio.stamp(job.seconds));
+        startSlice(run, job);
+      }
+      await sleep(80);
     }
-  } catch (e) {
-    // What was already transcribed stays useful, so the run settles with it and the caller decides
-    // how to deliver it.
-    run.error = e.message || 'Transcription stopped.';
-    await stopTranscribe();
   } finally {
-    if (transcribeRun === run) {
-      run.busy = false;
-      // A slice that arrived while the loop was finishing its last request would otherwise wait for
-      // the next one, so pick the queue back up here.
-      if (run.queue.length) pumpTranscribe();
-    }
+    if (transcribeRun === run) run.pumping = false;
   }
 }
+
 
 async function finishTranscribe() {
   const run = transcribeRun;
@@ -1775,6 +1804,7 @@ function renderMacros() {
   if (!list) return;
   $('macros-btn').classList.toggle('recording', !!rec);
   $('macro-record').hidden = !!rec;
+  syncRail().catch(() => {});
   $('rec-box').hidden = !rec;
   if (rec) {
     if ($('rec-name').value !== rec.name) $('rec-name').value = rec.name;
@@ -1807,10 +1837,37 @@ function renderMacros() {
       await chrome.storage.local.set({ [MACROS_KEY]: macros });
       renderMacros(); notify(`Deleted “${macro.name}”.`);
     });
-    row.append(open, start, drop); list.append(row);
+    // A pinned macro gets an icon on the page rail, so the one you run all day is a click away.
+    const pin = document.createElement('button');
+    pin.type = 'button';
+    pin.className = 'macro-drop';
+    pin.textContent = macro.pinned ? '\u25cf' : '\u25cb';
+    pin.title = macro.pinned ? 'Remove from the page rail' : 'Keep on the page rail';
+    pin.setAttribute('aria-label', pin.title);
+    pin.setAttribute('aria-pressed', macro.pinned ? 'true' : 'false');
+    pin.addEventListener('click', async () => {
+      macros = macros.map(item => item.id === macro.id ? { ...item, pinned: !item.pinned } : item);
+      await chrome.storage.local.set({ [MACROS_KEY]: macros });
+      renderMacros();
+      notify(macro.pinned ? 'Removed that macro from the rail.' : 'On the rail — look at the right edge of the page.');
+    });
+    row.append(open, start, pin, drop); list.append(row);
   }
 }
 
+// The rail lives in the page, so the panel pushes it a shaped list whenever macros change.
+async function syncRail() {
+  if (!globalThis.Macros?.rail) return;
+  await send('rail-sync', { entries: Macros.rail(macros) }).catch(() => {});
+}
+
+function runMacroById(id) {
+  const macro = macros.find(item => item.id === id);
+  if (!macro) { notify('That macro is gone — open Macros and check the list.', true); return Promise.resolve(false); }
+  if (workflow || macroRun) { notify('Mezze is busy — stop the run before starting a macro.', true); return Promise.resolve(false); }
+  runMacro(macro).catch(e => notify(e.message || 'Could not run that macro.', true));
+  return Promise.resolve(true);
+}
 function onMacroEvent(event) {
   if (!rec || !event?.type) return;
   const now = Date.now();
@@ -2423,3 +2480,11 @@ chrome.runtime.onMessage.addListener((message, sender) => {
   setInterval(() => checkUpdate(true).catch(() => {}), UPDATE_INTERVAL);
   await autorun();
 })();
+
+
+// A click on the page rail names a macro by id. Replay is the panel's job, so this is where it starts.
+chrome.runtime.onMessage.addListener((message, sender, respond) => {
+  if (message?.type !== 'macro-run-request') return undefined;
+  runMacroById(String(message.id || '')).then(started => respond?.({ started })).catch(() => respond?.({ started: false }));
+  return true;
+});

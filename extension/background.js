@@ -370,7 +370,23 @@ const KEY_MAP = {
 const KEY_ALIASES = { esc: 'Escape', return: 'Enter', space: 'Space', up: 'ArrowUp', down: 'ArrowDown', left: 'ArrowLeft', right: 'ArrowRight', pgup: 'PageUp', pgdn: 'PageDown', pageup: 'PageUp', pagedown: 'PageDown', del: 'Delete', backspace: 'Backspace', insert: 'Insert', home: 'Home', end: 'End', tab: 'Tab', enter: 'Enter' };
 const MODIFIER_BITS = { Alt: 1, Control: 2, Meta: 4, Shift: 8 };
 const MODIFIER_ALIASES = { ctrl: 'Control', control: 'Control', shift: 'Shift', alt: 'Alt', option: 'Alt', meta: 'Meta', cmd: 'Meta', command: 'Meta' };
-const PUNCTUATION = { '/': 'Slash', '?': 'Slash', '.': 'Period', ',': 'Comma', '-': 'Minus', '=': 'Equal', ';': 'Semicolon', "'": 'Quote', '[': 'BracketLeft', ']': 'BracketRight', '\\': 'Backslash', '`': 'Backquote' };
+// A character typed as a real key event has to carry the code and the virtual key a keyboard sends.
+// The ASCII value is not those: "." went out as virtual key 46, which is Delete, and "@" went out with
+// no Shift and no code, so a page that filters on key codes dropped exactly the characters an email
+// address is made of while the field still looked filled in.
+const CODE_VK = { Backquote: 192, Minus: 189, Equal: 187, BracketLeft: 219, BracketRight: 221, Backslash: 220, Semicolon: 186, Quote: 222, Comma: 188, Period: 190, Slash: 191, Space: 32, Digit0: 48, Digit1: 49, Digit2: 50, Digit3: 51, Digit4: 52, Digit5: 53, Digit6: 54, Digit7: 55, Digit8: 56, Digit9: 57 };
+const UNSHIFTED = { ' ': 'Space', '.': 'Period', ',': 'Comma', '/': 'Slash', ';': 'Semicolon', "'": 'Quote', '[': 'BracketLeft', ']': 'BracketRight', '\\': 'Backslash', '-': 'Minus', '=': 'Equal' };
+const SHIFTED = { '~': 'Backquote', '!': 'Digit1', '@': 'Digit2', '#': 'Digit3', '$': 'Digit4', '%': 'Digit5', '^': 'Digit6', '&': 'Digit7', '*': 'Digit8', '(': 'Digit9', ')': 'Digit0', '_': 'Minus', '+': 'Equal', '{': 'BracketLeft', '}': 'BracketRight', '|': 'Backslash', ':': 'Semicolon', '"': 'Quote', '<': 'Comma', '>': 'Period', '?': 'Slash' };
+UNSHIFTED[String.fromCharCode(96)] = 'Backquote';
+const SHIFT_BIT = 8;
+function charEvent(char) {
+  const plain = UNSHIFTED[char], shifted = SHIFTED[char];
+  if (plain) return { key: char, code: plain, windowsVirtualKeyCode: CODE_VK[plain], nativeVirtualKeyCode: CODE_VK[plain], modifiers: 0 };
+  if (shifted) return { key: char, code: shifted, windowsVirtualKeyCode: CODE_VK[shifted], nativeVirtualKeyCode: CODE_VK[shifted], modifiers: SHIFT_BIT };
+  if (/^[a-z]$/i.test(char)) { const up = char.toUpperCase(); return { key: char, code: 'Key' + up, windowsVirtualKeyCode: up.charCodeAt(0), nativeVirtualKeyCode: up.charCodeAt(0), modifiers: /[A-Z]/.test(char) ? SHIFT_BIT : 0 }; }
+  if (/^[0-9]$/.test(char)) return { key: char, code: 'Digit' + char, windowsVirtualKeyCode: char.charCodeAt(0), nativeVirtualKeyCode: char.charCodeAt(0), modifiers: 0 };
+  return null;
+}
 // People navigate with shortcuts (/ for search, Shift+Tab, Control+K), so keys go out as real events.
 async function pressKey(target, spec) {
   const parts = String(spec ?? '').split('+').map(part => part.trim()).filter(Boolean);
@@ -388,9 +404,10 @@ async function pressKey(target, spec) {
   const shifted = printable && ((modifiers & MODIFIER_BITS.Shift) !== 0 || /[A-Z]/.test(printable));
   const key = named ? (named.code === 'Space' ? ' ' : named.code) : (shifted ? printable.toUpperCase() : printable);
   const text = named ? named.text : ((modifiers & ~MODIFIER_BITS.Shift) !== 0 ? undefined : key);
-  const code = named ? named.code : (PUNCTUATION[printable] || (/[a-z]/i.test(printable) ? `Key${printable.toUpperCase()}` : (/[0-9]/.test(printable) ? `Digit${printable}` : '')));
-  const vk = named ? named.vk : printable.toUpperCase().charCodeAt(0);
-  const event = { key, code, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk, modifiers };
+  const typed = named ? null : charEvent(printable);
+  const code = named ? named.code : (typed?.code || '');
+  const vk = named ? named.vk : (typed?.windowsVirtualKeyCode || printable.toUpperCase().charCodeAt(0));
+  const event = { key, code, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk, modifiers: (modifiers | (typed?.modifiers || 0)) };
   await chrome.debugger.sendCommand(target, 'Input.dispatchKeyEvent', { type: text ? 'keyDown' : 'rawKeyDown', ...event, ...(text ? { text, unmodifiedText: printable || text } : {}) });
   await chrome.debugger.sendCommand(target, 'Input.dispatchKeyEvent', { type: 'keyUp', ...event });
 }
@@ -402,9 +419,9 @@ async function typeKeys(target, text) {
       await chrome.debugger.sendCommand(target, 'Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
       continue;
     }
-    const virtual = char.toUpperCase().charCodeAt(0);
-    await chrome.debugger.sendCommand(target, 'Input.dispatchKeyEvent', { type: 'keyDown', key: char, text: char, unmodifiedText: char, windowsVirtualKeyCode: virtual });
-    await chrome.debugger.sendCommand(target, 'Input.dispatchKeyEvent', { type: 'keyUp', key: char, windowsVirtualKeyCode: virtual });
+    const known = charEvent(char) || { key: char, code: '', windowsVirtualKeyCode: char.toUpperCase().charCodeAt(0), nativeVirtualKeyCode: 0, modifiers: 0 };
+    await chrome.debugger.sendCommand(target, 'Input.dispatchKeyEvent', { type: 'keyDown', ...known, text: char, unmodifiedText: char });
+    await chrome.debugger.sendCommand(target, 'Input.dispatchKeyEvent', { type: 'keyUp', ...known });
   }
 }
 // A person watching the tab cannot tell where the agent is clicking: CDP input moves no real
@@ -1055,7 +1072,7 @@ async function clickType(tab, action, width, height) {
     }
     if (action.submit) { await sleep(150); await pressKey(target, 'Enter'); }
     // The field reports exactly the text that was sent: proof the step worked, whatever the page hash says.
-    return { typed: 'insertText', typedOk: after.kind === 'editable' ? after.value === action.text : null };
+    return { typed: 'insertText', typedOk: after.kind === 'editable' ? String(after.value).slice(-action.text.length) === action.text : null };
   });
 }
 // Input has two engines. The debugger sends real, trusted events, exposes the accessibility tree and
@@ -1088,7 +1105,7 @@ async function scriptedClickType(tab, action, width, height) {
   }
   await sleep(150);
   if (action.submit) { await sleep(150); await keyOn(tab.id, 'Enter'); }
-  return { via: 'script', typed: 'script', typedOk: typeof typed.value === 'string' ? typed.value === action.text : null };
+  return { via: 'script', typed: 'script', typedOk: typeof typed.value === 'string' ? typed.value.slice(-action.text.length) === action.text : null };
 }
 // One way to press a key, whichever engine is running.
 async function keyOn(tabId, spec) {
@@ -1421,6 +1438,28 @@ async function handle(message) {
   // The audio slices travel from the page to the panel, which owns the Worker call and the transcript.
   if (message.type === 'transcribe-event') return { ok: true };
   if (message.type === 'player-closed') return { ok: true };
+  if (message.type === 'rail-sync') {
+    // The rail is icons only, so the list is shaped in the panel and painted here. Nothing is cached:
+    // a stale icon that runs the wrong macro is worse than no icon.
+    const entries = (Array.isArray(message.entries) ? message.entries : []).slice(0, 8);
+    const targets = message.tabId ? [message.tabId] : (await chrome.tabs.query({ active: true, lastFocusedWindow: true }).catch(() => [])).map(tab => tab.id).filter(Boolean);
+    let painted = 0;
+    for (const tabId of targets) {
+      const tab = await getTab(tabId).catch(() => null);
+      if (!tab || !permitted(tab.url)) continue;
+      await chrome.scripting.executeScript({ target: { tabId }, files: ['rail.js'] }).catch(() => {});
+      const [result] = await chrome.scripting.executeScript({ target: { tabId }, func: paintRail, args: [entries] }).catch(() => []);
+      if (result?.result) painted += 1;
+    }
+    return { painted, entries: entries.length };
+  }
+  if (message.type === 'rail-run') {
+    // Replay drives the page, and the panel is where replay lives, so an open panel is asked first.
+    const answer = await chrome.runtime.sendMessage({ type: 'macro-run-request', id: String(message.id || '') }).catch(() => null);
+    if (answer?.started) return { started: true };
+    await notifyDone('Mezze', 'Open the Mezze panel once, then the rail can run this macro.').catch(() => {});
+    return { started: false };
+  }
   if (message.type === 'tabs') {
     // Every window, not just this one: the page you reference with @ is often in another window.
     const tabs = await chrome.tabs.query({});
@@ -1477,6 +1516,10 @@ async function handle(message) {
     return result;
   }
   throw new Error('Unknown action.');
+}
+// Painted by a serialised function, so this wrapper may only touch the page it runs in.
+function paintRail(entries) {
+  try { window.MezzeRail?.render(entries); return true; } catch { return false; }
 }
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
   if (sender.id !== chrome.runtime.id) return;

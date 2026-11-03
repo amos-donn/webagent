@@ -189,5 +189,19 @@
     ].filter(Boolean).join('\n');
   }
 
-  return { ORDER, TYPES, KEYS, SHORTCUTS, STEPS, rank, append, prune, label, summary, nameFor, recovery, host, pageKey, pageLoose, keySpec };
+  // The rail shows the macros you pinned, as one letter each: it is a launcher, not a menu, so the
+  // list stays short by design and an unpinned macro never appears there.
+  const RAIL = 8;
+  function rail(macros) {
+    return (Array.isArray(macros) ? macros : [])
+      .filter(macro => macro && macro.pinned === true && Array.isArray(macro.steps) && macro.steps.length)
+      .slice(0, RAIL)
+      .map(macro => {
+        const name = clean(macro.name, 60) || 'Macro';
+        const first = name.match(/[\p{L}\p{N}]/u);
+        return { id: String(macro.id || ''), name, letter: first ? first[0].toUpperCase() : '?' };
+      })
+      .filter(entry => entry.id);
+  }
+  return { rail, RAIL, ORDER, TYPES, KEYS, SHORTCUTS, STEPS, rank, append, prune, label, summary, nameFor, recovery, host, pageKey, pageLoose, keySpec };
 });

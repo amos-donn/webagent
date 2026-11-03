@@ -26,9 +26,11 @@
     padding: 0 4px; border-radius: 7px; cursor: pointer; color: inherit; font-size: 11px; box-sizing: border-box; }
   button:hover { background: rgba(120,120,130,.18); }
   button:focus-visible { outline: 2px solid #10b981; outline-offset: 1px; }
-  .lines { flex: 1; overflow-y: auto; padding: 8px 6px 16px; }
-  .line { display: block; width: 100%; box-sizing: border-box; text-align: left; padding: 5px 8px; border-radius: 8px;
-    color: inherit; opacity: .55; font-size: 12.5px; line-height: 1.45; }
+  .lines { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; gap: 2px; overflow-y: auto;
+    overscroll-behavior: contain; padding: 8px 6px 16px; }
+  .line { flex: 0 0 auto; display: block; width: 100%; box-sizing: border-box; text-align: left; padding: 5px 8px;
+    border-radius: 8px; color: inherit; opacity: .55; font-size: 12.5px; line-height: 1.45; white-space: normal;
+    overflow-wrap: anywhere; }
   .line:hover { opacity: .95; background: rgba(120,120,130,.12); }
   .line.on { opacity: 1; background: rgba(16,185,129,.16); }
   .line.on .at { color: #10b981; }
@@ -86,14 +88,33 @@
     } catch { /* ignore a broken record */ }
   }
 
+  // A constructed stylesheet belongs to the document that made it, and Chrome refuses one from another
+  // document rather than throwing. The island moves into the Picture-in-Picture window, so it is
+  // repainted from whichever document it is in now: without that the island arrives as bare HTML.
+  function paint(root, doc) {
+    if (!root || !doc?.defaultView) return false;
+    for (const stale of root.querySelectorAll('style[data-mezze]')) stale.remove();
+    try {
+      const sheet = new doc.defaultView.CSSStyleSheet();
+      sheet.replaceSync(CSS);
+      root.adoptedStyleSheets = [sheet];
+      return true;
+    } catch { /* a page with a strict CSP gets an element instead */ }
+    try {
+      const style = doc.createElement('style');
+      style.dataset.mezze = '';
+      style.textContent = CSS;
+      root.append(style);
+      return true;
+    } catch { return false; }
+  }
   function build() {
     if (state.island?.isConnected) return;
     const host = document.createElement('div');
     host.setAttribute('data-mezze-script', '');
     const root = host.attachShadow({ mode: 'open' });
     // A constructed stylesheet is not an inline <style>, so a strict page CSP cannot refuse it.
-    try { const sheet = new CSSStyleSheet(); sheet.replaceSync(CSS); root.adoptedStyleSheets = [sheet]; }
-    catch { const style = document.createElement('style'); style.textContent = CSS; root.append(style); }
+    paint(root, document);
 
     const island = document.createElement('section');
     island.id = 'island';
@@ -168,6 +189,7 @@
     // Dragging: the island follows the pointer until it is let go, and stays where it was dropped.
     island.querySelector('header').addEventListener('pointerdown', event => {
       if (event.target.closest('button')) return;
+      if (state.pip) return;
       const rect = island.getBoundingClientRect();
       const offset = { x: event.clientX - rect.left, y: event.clientY - rect.top };
       island.style.right = 'auto';
@@ -284,7 +306,11 @@
     if (!active) return;
     // Follow along only when the person has not scrolled the list themselves in the last few seconds.
     if (Date.now() - state.scrolled < 2500) return;
-    state.body.scrollTop = Math.max(0, active.offsetTop - state.body.clientHeight / 2 + active.offsetHeight / 2);
+    // offsetTop is measured from the island, which is the positioned ancestor, not from the list: the
+    // two boxes are the only reliable way to follow the line being spoken.
+    const list = state.body.getBoundingClientRect();
+    const box = active.getBoundingClientRect();
+    state.body.scrollTop = Math.max(0, state.body.scrollTop + (box.top - list.top) - state.body.clientHeight / 2 + box.height / 2);
   }
 
   function tick() {
@@ -310,10 +336,11 @@
     if (state.pip) { state.pip.close(); return true; }
     const pip = await window.documentPictureInPicture.requestWindow({ width: 420, height: 380 });
     state.pip = pip;
-    try { const sheet = new CSSStyleSheet(); sheet.replaceSync(CSS); pip.document.adoptedStyleSheets = [sheet]; }
-    catch { const style = pip.document.createElement('style'); style.textContent = CSS; pip.document.head.append(style); }
+    // The host moves into the PiP document, so its shadow root has to be painted from that document:
+    // a sheet built in the page document cannot style anything in this window.
+    paint(state.root, pip.document);
     const base = pip.document.createElement('style');
-    base.textContent = 'html,body{margin:0;height:100%;background:transparent}';
+    base.textContent = 'html,body{margin:0;height:100%;background:#fafafa;color-scheme:light dark}@media (prefers-color-scheme: dark){html,body{background:#18181b}}';
     pip.document.head.append(base);
     pip.document.title = state.title || 'Transcript';
     pip.addEventListener('pagehide', restoreFromPip);
@@ -329,7 +356,7 @@
     const pip = state.pip;
     state.pip = null;
     state.island?.removeAttribute('pip');
-    if (state.host) { state.host.style.height = ''; document.documentElement.append(state.host); }
+    if (state.host) { state.host.style.height = ''; paint(state.root, document); document.documentElement.append(state.host); }
     try { pip?.close(); } catch { /* already gone */ }
   }
 

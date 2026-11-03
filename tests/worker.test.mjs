@@ -681,7 +681,7 @@ test('the final report speaks as the agent, not about it', async () => {
     assert.equal(out.reply, reply);
     assert.match(out.reply, /^I /, 'the report is written by the one who did the work');
     const prompt = said(mock.calls[0]);
-    assert.match(prompt, /first person, two to four sentences/);
+    assert.match(prompt, /first person, one or two sentences/);
     assert.match(prompt, /Never "the agent filled in the form"/);
   } finally { mock.restore(); }
 });
