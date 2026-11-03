@@ -2270,7 +2270,7 @@ $('pause').addEventListener('click', () => {
 document.addEventListener('visibilitychange', () => { if (document.hidden && chat) persist().catch(() => {}); });
 $('worker').addEventListener('change', async () => { await chrome.storage.local.set({ worker: $('worker').value.trim().replace(/\/$/, '') }); });
 $('bridge-toggle').addEventListener('change', async () => { try { const out = await send('bridge', { on: $('bridge-toggle').checked }); notify(out.connected ? 'Bridge on. Start node bridge/server.mjs to accept MCP clients.' : 'Bridge off.'); } catch (e) { notify(e.message || 'Could not toggle the bridge.', true); } });
-$('pointer-toggle').addEventListener('change', async () => { await chrome.storage.local.set({ pointer: $('pointer-toggle').checked }); notify($('pointer-toggle').checked ? 'Pointer on: a green dot shows where the agent clicks.' : 'Pointer off.'); });
+$('pointer-toggle').addEventListener('change', async () => { await chrome.storage.local.set({ pointer: $('pointer-toggle').checked }); notify($('pointer-toggle').checked ? 'Pointer on: a green arrow shows where the agent clicks.' : 'Pointer off.'); });
 $('speed').addEventListener('change', async () => {
   const value = $('speed').value;
   speed = Object.prototype.hasOwnProperty.call(PACING, value) ? value : 'fast';

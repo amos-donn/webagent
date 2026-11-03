@@ -395,9 +395,10 @@ async function typeKeys(target, text) {
   }
 }
 // A person watching the tab cannot tell where the agent is clicking: CDP input moves no real
-// pointer. So a cursor is drawn — a rounded dot with a soft halo and no arrow, because an arrow says
-// "a mouse is here" and this one belongs to the agent. Presentation only; every call degrades
-// silently and none of it changes the input.
+// pointer. So the agent draws one — a rounded arrow with no stem, its tip sitting on the click point.
+// The shape is a kite rather than a triangle because a triangle reads as "play"; the corners are
+// rounded by stroking the same path, so no hand-tuned bezier can drift. Presentation only; every call
+// degrades silently and none of it changes the input.
 function pointerMove(x, y) {
   const id = 'webagent-pointer';
   let host = document.getElementById(id);
@@ -408,27 +409,42 @@ function pointerMove(x, y) {
     const root = host.attachShadow({ mode: 'open' });
     const style = document.createElement('style');
     style.textContent = '.wrap{position:fixed;left:0;top:0;width:0;height:0;will-change:transform}'
-      + '.dot{position:absolute;left:-8px;top:-8px;width:16px;height:16px;border-radius:50%;background:#157a52;border:2px solid rgba(255,255,255,.9);box-shadow:0 2px 10px rgba(9,60,40,.4),0 0 0 5px rgba(21,122,82,.16);opacity:0}'
+      + '.arrow{position:absolute;left:-3px;top:-1px;width:20px;height:20px;overflow:visible;opacity:0;transform-origin:3px 1px;filter:drop-shadow(0 2px 5px rgba(9,60,40,.34)) drop-shadow(0 0 4px rgba(21,122,82,.38))}'
       + '.ring{position:absolute;left:-26px;top:-26px;width:52px;height:52px;border-radius:50%;border:2px solid rgba(21,122,82,.75);background:radial-gradient(circle,rgba(21,122,82,.24),rgba(21,122,82,0) 70%);opacity:0}';
     const wrap = document.createElement('div');
     wrap.className = 'wrap';
     const ring = document.createElement('span');
     ring.className = 'ring';
-    const dot = document.createElement('span');
-    dot.className = 'dot';
-    dot.setAttribute('aria-hidden', 'true');
-    wrap.append(ring, dot);
+    // The 1.7.x arrow with its stem deleted: the same tip, vertical left edge and shallow inward curve
+    // on the lower edge, so it still reads as a cursor rather than a triangle. Nothing sticks out the
+    // back, which is what made the old one look like a mouse someone was holding. Corners are rounded
+    // by stroking the path (the emblem stroke is thicker than the white one), and the pressed-in scale
+    // pivots on the tip so a click never looks like a slide.
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('class', 'arrow');
+    svg.setAttribute('viewBox', '0 0 24 24');
+    svg.setAttribute('aria-hidden', 'true');
+    for (const [paint, width] of [['#fff', 6], ['#157a52', 3.6]]) {
+      const shape = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      shape.setAttribute('d', 'M5 3 L5 19.6 L9.4 15.4 L12.3 14.1 L18.8 13.6 Z');
+      shape.setAttribute('fill', paint);
+      shape.setAttribute('stroke', paint);
+      shape.setAttribute('stroke-width', String(width));
+      shape.setAttribute('stroke-linejoin', 'round');
+      svg.append(shape);
+    }
+    wrap.append(ring, svg);
     root.append(style, wrap);
     document.documentElement.appendChild(host);
   }
-  const root = host.shadowRoot, wrap = root.querySelector('.wrap'), dot = root.querySelector('.dot');
+  const root = host.shadowRoot, wrap = root.querySelector('.wrap'), arrow = root.querySelector('.arrow');
   const still = matchMedia('(prefers-reduced-motion: reduce)').matches;
   const from = host.dataset.x ? { x: Number(host.dataset.x), y: Number(host.dataset.y) } : null;
   host.dataset.x = String(Math.round(x));
   host.dataset.y = String(Math.round(y));
   const to = `translate3d(${Math.round(x)}px,${Math.round(y)}px,0)`;
   if (!from) {
-    dot.style.opacity = '1';
+    arrow.style.opacity = '1';
     // First appearance: glide in from the nearest edge, so the cursor looks like it entered the page
     // rather than materialising on top of the thing it is about to click.
     const width = (typeof innerWidth === 'number' && innerWidth) || document.documentElement.clientWidth || 1024;
@@ -443,7 +459,7 @@ function pointerMove(x, y) {
   // cursor at all", which defeats the whole point of drawing one.
   const distance = Math.hypot(x - from.x, y - from.y);
   const ms = still ? Math.min(110, Math.max(60, Math.round(distance * 0.25))) : Math.min(360, Math.max(140, Math.round(distance * 0.9)));
-  dot.style.opacity = '1';
+  arrow.style.opacity = '1';
   wrap.animate([{ transform: `translate3d(${from.x}px,${from.y}px,0)` }, { transform: to }], { duration: ms, easing: 'cubic-bezier(.22,.61,.36,1)', fill: 'forwards' }).finished.catch(() => {});
   return ms;
 }
@@ -451,14 +467,14 @@ function pointerPress() {
   const host = document.getElementById('webagent-pointer');
   const root = host && host.shadowRoot;
   if (!root) return false;
-  const ring = root.querySelector('.ring'), dot = root.querySelector('.dot');
-  if (!ring || !dot) return false;
+  const ring = root.querySelector('.ring'), arrow = root.querySelector('.arrow');
+  if (!ring || !arrow) return false;
   if (matchMedia('(prefers-reduced-motion: reduce)').matches) {
     ring.animate([{ transform: 'scale(.35)', opacity: .9 }, { transform: 'scale(.85)', opacity: 0 }], { duration: 260, easing: 'ease-out' });
     return true;
   }
   ring.animate([{ transform: 'scale(.2)', opacity: .9 }, { transform: 'scale(1)', opacity: 0 }], { duration: 420, easing: 'cubic-bezier(.16,.8,.32,1)' });
-  dot.animate([{ transform: 'scale(1)' }, { transform: 'scale(.82)' }, { transform: 'scale(1)' }], { duration: 190, easing: 'ease-out' });
+  arrow.animate([{ transform: 'scale(1)' }, { transform: 'scale(.87)' }, { transform: 'scale(1)' }], { duration: 190, easing: 'ease-out' });
   return true;
 }
 async function pointerEnabled() {

@@ -116,7 +116,7 @@ The stopwatch button's neighbour in the topbar is the macro recorder (`/record`,
 
 Each step stores several ways to find its control — a test id, a role and accessible name, a label, a field name, a stable id, its text, and only then a short CSS path — and replay walks that list in that order. The candidates are counted at record time, so a macro that clicked the second "Save" still clicks the second "Save". That is Selenium IDE's fallback-list idea rather than Chrome's single best selector, and it is the difference between a macro that survives a redesign and one that does not.
 
-Replay does not call Gemini. The panel sends each recorded target through the agent's own action path (`target` instead of `ref` or coordinates), so it gets real CDP input, the green dot, the settle window, the effect check and the scripted-click fallback — a macro is the agent's hands with a recorded intention, not a second automation engine. A step waits for its control (up to six seconds) rather than sleeping, and `<select>` is set through `input`/`change` so native dropdowns work without an OS-level menu.
+Replay does not call Gemini. The panel sends each recorded target through the agent's own action path (`target` instead of `ref` or coordinates), so it gets real CDP input, the green arrow, the settle window, the effect check and the scripted-click fallback — a macro is the agent's hands with a recorded intention, not a second automation engine. A step waits for its control (up to six seconds) rather than sleeping, and `<select>` is set through `input`/`change` so native dropdowns work without an OS-level menu.
 
 When a step cannot find its target, the macro stops, says which step failed, and puts a repair prompt in the message box — the macro name, the failure and the remaining steps. Send it, and the agent finishes the job from the page it is on. **Passwords and card numbers are never stored**: a credential-looking field (password type, `autocomplete=current-password`/`new-password`/`one-time-code`/`cc-*`, or a name that says so) is recorded as a step with no value, and replay clicks it, pauses, and waits for you to type it. Recording covers the top frame only — a login widget inside a cross-origin iframe is not captured — and stops on `chrome://` pages, the Web Store and the PDF viewer, which Chrome does not allow extensions to script.
 
@@ -175,9 +175,10 @@ line of the result. Nothing is announced while you are watching, because you can
 **Tab groups.** Tabs the agent navigates are gathered into one green group called *Mezze*, so you can see
 the tabs a run has touched and close them in one move.
 
-**The cursor.** A rounded green dot with a soft halo follows the agent's clicks — no arrow, no tail, because
-an arrow implies a mouse you are holding. It glides to the target and ripples where the click lands, and
-never intercepts a click itself.
+**The cursor.** A rounded green arrow follows the agent's clicks: tailless — no stem, so it reads as something
+drawn rather than a mouse resting there — with softened corners and a white edge that survives a dark page.
+Its tip is the click point, it glides from where it last was, and it ripples where the click lands. It never
+intercepts a click itself.
 
 **Languages.** The extension's name, description, menu items and toolbar title are translatable
 (`_locales/en`, `_locales/zh_CN`). The panel's own interface is still English.
