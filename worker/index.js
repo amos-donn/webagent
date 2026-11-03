@@ -1,3 +1,5 @@
+import LANDING from './landing.mjs';
+
 // Speed picks the model as well as the pauses in the panel. A light model answers in about a
 // second; the bigger ones think for several, which is why fast is the default.
 const SPEED_MODELS = { fast: 'gemini-3.5-flash-lite', balanced: 'gemini-3.6-flash', careful: 'gemini-3.8-flash' };
@@ -513,6 +515,11 @@ export default {
   async fetch(request, env) {
     if (request.method === 'OPTIONS') return json({ ok: true });
     const path = new URL(request.url).pathname;
+    // The landing page comes before the D1 check on purpose: the first request anyone makes should not
+    // depend on a binding, and a missing database should not turn the front door into a 503.
+    if ((path === '/' || path === '/index.html') && request.method === 'GET') {
+      return new Response(LANDING, { headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'public, max-age=600' } });
+    }
     // A URL and a key can be right while the binding that every rate limit needs is missing, and that
     // only ever showed up as a 503 on a real task. Say it in the one request the panel already makes.
     if (path === '/health' && request.method === 'GET') return json({ ok: true, provider: 'gemini', model: modelName(env), speed: DEFAULT_SPEED, db: !!env.DB });

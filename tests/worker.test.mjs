@@ -2,7 +2,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 const source = await readFile(new URL('../worker/index.js', import.meta.url), 'utf8');
-const worker = (await import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`)).default;
+// The worker imports its landing page by a relative path, which a data: module cannot resolve, so the
+// page is inlined as a data: URL of its own before the worker is loaded the same way.
+const landing = await readFile(new URL('../worker/landing.mjs', import.meta.url), 'utf8');
+const landingUrl = `data:text/javascript;base64,${Buffer.from(landing).toString('base64')}`;
+const worker = (await import(`data:text/javascript;base64,${Buffer.from(source.replace("'./landing.mjs'", `'${landingUrl}'`)).toString('base64')}`)).default;
 const db = { prepare() { return { bind() { return { async first() { return { count: 1 }; } }; } }; } };
 const observation = { goal:'Find the menu', text:'Menu', image:'YWJj', url:'https://example.com/', width:100, height:100, steps:[] };
 function request(body, path = '/agent') { return new Request(`https://worker.example${path}`, { method:'POST', headers: { 'Content-Type':'application/json' }, body:JSON.stringify(body) });
