@@ -826,9 +826,94 @@ function pauseLabel(run) {
   button.title = text; button.setAttribute('aria-label', text);
   button.classList.toggle('held', held);
 }
+// Notes are the agent's scratchpad: keyed values it writes with remember, kept in this browser so a
+// value found in one run is still there in the next. Loaded once, then kept in memory.
+let notesStore = null, notesLoading = null;
+let shadowMode = false;
+async function loadNotes() {
+  if (notesStore) return notesStore;
+  notesLoading = notesLoading || chrome.storage.local.get('notes').then(saved => {
+    notesStore = saved?.notes && typeof saved.notes === 'object' ? saved.notes : {};
+    return notesStore;
+  }).catch(() => (notesStore = {}));
+  return notesLoading;
+}
+function notesList() {
+  return Object.entries(notesStore || {}).slice(-20).map(([key, value]) => ({ key, value: String(value).slice(0, 500) }));
+}
+async function rememberFact(run, action) {
+  await loadNotes().catch(() => {});
+  const key = String(action.key || '').slice(0, 60);
+  if (!key) throw new Error('A note needs a key.');
+  if (action.forget) delete notesStore[key];
+  else notesStore[key] = String(action.value ?? '').slice(0, 500);
+  await chrome.storage.local.set({ notes: notesStore || {} }).catch(() => {});
+  const shown = action.forget ? 'forgot ' + key : key + ' = ' + notesStore[key];
+  run.steps.push({ type: 'remember', description: action.description || key, ok: true, changed: false, note: shown });
+  pushMessage('note', action.forget ? 'Forgot “' + key + '”.' : 'Noted ' + key + ': ' + String(notesStore[key]).slice(0, 160));
+  return 'ok';
+}
+// A blocking question: the run waits here until the person answers, which is the only way past a
+// CAPTCHA or a choice the goal does not settle. The answer becomes a step, so the next round sees it.
+function askUser(run, action) {
+  return new Promise(resolve => {
+    const card = document.createElement('div');
+    card.className = 'message ask-card';
+    const question = document.createElement('p');
+    question.className = 'ask-question';
+    question.textContent = action.question || 'I need your help before I can continue.';
+    const row = document.createElement('div');
+    row.className = 'ask-row';
+    card.append(question, row);
+    $('steps').append(card);
+    card.scrollIntoView({ block: 'nearest' });
+    let poll = 0;
+    const finish = answer => {
+      clearInterval(poll);
+      card.remove();
+      run.steps.push({ type: 'ask', description: action.question || '', ok: true, changed: false, note: 'the user answered: ' + answer });
+      pushMessage('assistant', answer);
+      resolve('ok');
+    };
+    const button = (label, answer) => {
+      const node = document.createElement('button');
+      node.type = 'button';
+      node.className = 'secondary';
+      node.textContent = label;
+      node.addEventListener('click', () => finish(answer));
+      row.append(node);
+      return node;
+    };
+    if (action.kind === 'takeover') {
+      pushMessage('note', 'Take over in the page. I will carry on when you press Done.');
+      button('Done — continue', 'The user handled it in the page and said to continue.');
+    } else if (action.kind === 'confirm') {
+      button('Yes', 'yes');
+      button('No', 'no');
+    }
+    for (const option of Array.isArray(action.options) ? action.options : []) button(option, option);
+    if (action.kind !== 'takeover' && action.kind !== 'confirm') {
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.className = 'ask-input';
+      input.placeholder = 'Your answer';
+      input.setAttribute('aria-label', 'Your answer');
+      const send = document.createElement('button');
+      send.type = 'button';
+      send.className = 'secondary';
+      send.textContent = 'Send';
+      send.addEventListener('click', () => { if (input.value.trim()) finish(input.value.trim()); });
+      input.addEventListener('keydown', event => { if (event.key === 'Enter' && input.value.trim()) { event.preventDefault(); finish(input.value.trim()); } });
+      row.append(input, send);
+      input.focus();
+    }
+    poll = window.setInterval(() => { if (workflow !== run) { clearInterval(poll); card.remove(); resolve('stop'); } }, 500);
+  });
+}
 async function next(run, prefetched) {
   if (workflow !== run) return;
   flushTiming(run);
+  await loadNotes().catch(() => {});
   if (run.paused && !(await hold(run))) return;
   if (workflow !== run) return;
   if (run.steps.length >= STEP_LIMIT) { pushMessage('note', `Stopped at the ${STEP_LIMIT}-action limit. Start a new chat to keep going.`); stop(); return; }
@@ -907,7 +992,7 @@ async function next(run, prefetched) {
   const sendImage = !!shot.image;
   // Every field is normalised here, because the Worker's only answer to a bad one is a 400 that the
   // panel cannot explain. Context tabs belong in this body: dropping them silently cost attachments.
-  const body = { goal:aimed(run), speed, intent:[run.goal, ...plan.map(item => item.title)].join('\n'), todos:plan, steps:run.steps.slice(-60), url:shot.url, title:shot.title, text:String(shot.text || ''), ...(sendImage ? { image: shot.image } : {}), width:Math.max(1, Math.round(Number(naturalWidth) || width)), height:Math.max(1, Math.round(Number(naturalHeight) || height)), elements, refs, tabs, contexts:extra, memory: run.memory || undefined, stalled:run.stalled, automatic:run.mode === 'autopilot', history: run.history?.length ? run.history : undefined, correction: run.correction || undefined };
+  const body = { goal:aimed(run), speed, intent:[run.goal, ...plan.map(item => item.title)].join('\n'), todos:plan, steps:run.steps.slice(-60), url:shot.url, title:shot.title, text:String(shot.text || ''), ...(sendImage ? { image: shot.image } : {}), width:Math.max(1, Math.round(Number(naturalWidth) || width)), height:Math.max(1, Math.round(Number(naturalHeight) || height)), elements, refs, tabs, contexts:extra, memory: run.memory || undefined, notes: notesList(), shadow: shadowMode, ...(run.shots?.length ? { images: run.shots } : {}), stalled:run.stalled, automatic:run.mode === 'autopilot', history: run.history?.length ? run.history : undefined, correction: run.correction || undefined };
   // Serialised once and sent verbatim, so the byte count below is the payload the Worker really gets.
   const payload = JSON.stringify(body);
   run.timing = { at: Date.now(), round: run.steps.length + 1, goal: run.goal.slice(0, 80), speed, refs: refs.length, image: sendImage, bytes: new TextEncoder().encode(payload).length, observeMs, actionMs: 0, actions: 0, settle: settleFor() };
@@ -1090,6 +1175,8 @@ async function actOnTabs(run, action) {
 async function executeOne(run, current) {
   if (!current || workflow !== run) return 'stop';
   const action = current.action;
+  if (action.type === 'ask') return askUser(run, action);
+  if (action.type === 'remember') return rememberFact(run, action);
   loading(LABELS[action.type] || 'Working', ICONS[action.type] || 'sparkle');
   currentAction(activeLabel(action));
   proposal = null;
@@ -1105,7 +1192,18 @@ async function executeOne(run, current) {
         pushMessage('note', `Extended this task to ${new URL(action.url).hostname}.`);
       }
     }
-    result = TAB_STEPS.has(action.type) ? await actOnTabs(run, action) : await send('act', { ...current, settleMs: settleFor(), stayPut, goal: run.goal, intent: [run.goal, ...plan.map(item => item.title)].join('\n'), allow: run.allow, automatic: run.mode === 'autopilot' });  }
+    if (action.type === 'see') {
+      // Sight for another tab: a chart, a PDF page or a canvas that text cannot describe. The picture
+      // rides on the next round instead of being described here.
+      const seen = tabByToken(run, action.tab);
+      const shotTab = await send('observe', { tabId: seen.id, activate: false, shot: true });
+      if (shotTab?.image) {
+        run.shots = [...(run.shots || []), { tab: action.tab, url: shotTab.url, image: shotTab.image }].slice(-2);
+        pushMessage('note', 'Looked at ' + shortTitle(seen) + ' as an image.');
+      } else pushMessage('note', 'Could not capture ' + shortTitle(seen) + ', so that image is missing.');
+      result = { seen: !!shotTab?.image, effect: { verified: null } };
+    }
+    if (action.type !== 'see') result = TAB_STEPS.has(action.type) ? await actOnTabs(run, action) : await send('act', { ...current, settleMs: settleFor(), stayPut, goal: run.goal, intent: [run.goal, ...plan.map(item => item.title)].join('\n'), allow: run.allow, automatic: run.mode === 'autopilot' });  }
   catch (error) {
     noteActionMs(run, actionStart, action.type);
     if (workflow !== run) return 'stop';
@@ -1128,6 +1226,17 @@ async function executeOne(run, current) {
   if (workflow !== run) return 'stop';
   noteActionMs(run, actionStart, action.type);
   if (result?.notice) pushMessage('note', result.notice);
+  if (result?.shadow) {
+    // Preview only: the step is described, nothing is fired, and the run stops here.
+    const planned = result.planned || {};
+    const shape = [planned.type, planned.ref ? 'ref ' + planned.ref : '', Number.isFinite(planned.x) ? 'at ' + planned.x + ',' + planned.y : '', planned.text ? 'text "' + String(planned.text).slice(0, 80) + '"' : '', planned.url ? planned.url : ''].filter(Boolean).join(' ');
+    pushMessage('note', 'Preview: ' + (shape || 'that step') + '. Nothing was clicked.');
+    pushMessage('note', 'That is shadow mode — turn Preview off in Settings and send the task again to run it.');
+    stop();
+    return 'stop';
+  }
+  // The page's own words for what just happened ("Saved", "Item added") are the best receipt there is.
+  if (result?.receipt) pushMessage('note', 'The page said: “' + String(result.receipt).slice(0, 160) + '”.');
   if (result?.generated) pushMessage('note', `Gemini wrote ${Number(result.generated).toLocaleString()} characters into the field.`);
   const verified = result?.effect?.verified;
   const changed = verified !== false;
@@ -2387,6 +2496,11 @@ $('slow-toggle').addEventListener('change', async () => {
   notify(slowPages ? 'Waiting up to four seconds for a slow menu before calling an action a failure.' : 'Deciding quickly. A slow menu may look like a failed click.');
 });
 $('stay-toggle').addEventListener('change', async () => {
+$('shadow-toggle').addEventListener('change', async () => {
+  shadowMode = $('shadow-toggle').checked;
+  await chrome.storage.local.set({ shadow: shadowMode }).catch(() => {});
+  notify(shadowMode ? 'Preview only — each step is described, nothing is clicked.' : 'Preview off — actions run for real.');
+});
   stayPut = $('stay-toggle').checked;
   await chrome.storage.local.set({ stayPut });
   notify(stayPut ? 'Working in the background — switch tabs freely.' : 'Switching to the working tab before each action.');
@@ -2448,6 +2562,8 @@ chrome.runtime.onMessage.addListener((message, sender) => {
   slowPages = saved.slowPages === true;
   $('speed').value = speed;
   $('input-mode').value = saved.inputMode === 'scripted' ? 'scripted' : 'debugger';
+  shadowMode = saved.shadow === true;
+  $('shadow-toggle').checked = shadowMode;
   $('slow-toggle').checked = slowPages;
   stayPut = saved.stayPut !== false;
   $('stay-toggle').checked = stayPut;

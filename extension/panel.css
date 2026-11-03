@@ -477,3 +477,9 @@ dialog[open] { animation:pop .18s ease both }
    hatch has to fit a panel that can be 320 px wide. */
 #approval-why { margin: 0 0 8px; }
 .approval-row { flex-wrap: wrap; }
+
+/* A blocking question sits in the conversation, because that is where the answer belongs. */
+.message.ask-card { display: flex; flex-direction: column; gap: 8px; }
+.ask-question { margin: 0; }
+.ask-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.ask-input { flex: 1 1 140px; min-width: 0; }

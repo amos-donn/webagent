@@ -263,7 +263,7 @@ function pageWatched() {
     box.observer = new MutationObserver(list => { box.mutations += list.length; });
     box.observer.observe(document, { subtree: true, childList: true, attributes: true, characterData: true });
   }
-  return { sig, mutations: box.mutations, dialogs: document.querySelectorAll('[role="dialog"],[aria-modal="true"]').length };
+  return { sig, mutations: box.mutations, resources: (performance.getEntriesByType('resource') || []).length, live: (document.querySelector('[role="status"],[aria-live="polite"],[aria-live="assertive"]')?.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 200), dialogs: document.querySelectorAll('[role="dialog"],[aria-modal="true"]').length };
 }
 async function watched(tabId) {
   try {
@@ -271,7 +271,11 @@ async function watched(tabId) {
     return result && typeof result === 'object' ? result : null;
   } catch { return null; }
 }
-async function signature(tabId) { const state = await watched(tabId); return state ? state.sig : ''; }
+// Resource entries and open dialogs join the signature: a click that saves through an API call, or opens
+// a dialog with no new text, used to read as "no change". They are appended here rather than inside the
+// page so the page keeps its cheap text hash.
+function sigOf(state) { return state ? state.sig + '|r' + (Number(state.resources) || 0) + '|d' + (Number(state.dialogs) || 0) : ''; }
+async function signature(tabId) { return sigOf(await watched(tabId)); }
 // App pages open menus and dialogs a second or two after the click, and a check made after 1.2 seconds
 // reads that as a dead click. Wait for the page to go quiet instead: quiet plus a change is a finished
 // action, quiet plus no change is a real NO_EFFECT, and a busy page is given the time it needs.
@@ -1121,7 +1125,8 @@ async function workerBase() {
 // outline and skeleton over the target so the user can see which field is being written.
 async function writeInto(fresh, action, message) {
   if (await scriptedInput()) fail('NO_DEBUGGER', 'Generated writing streams into the field through the debugger. Switch Input to Debugger in Settings, or ask the agent to type the text instead.');
-  const before = await signature(fresh.id);
+  const beforeState = await watched(fresh.id);
+  const before = sigOf(beforeState);
   const live = await liveViewportSafe(fresh.id);
   let point;
   if (action.ref) point = await refBox(fresh.id, action.ref, message.url);
@@ -1222,6 +1227,15 @@ async function guardAction(tabId, action, message) {
 }
 async function actOnTab(fresh, action, message) {
   settleBudget = Number(message?.settleMs) || SETTLE_MAX;
+  // Shadow mode describes the step instead of firing it: a plan can be inspected on a sensitive page
+  // before anything is clicked.
+  if (message?.shadow === true && !['read', 'wait', 'waitFor', 'remember', 'ask'].includes(action.type)) {
+    return {
+      shadow: true,
+      planned: { type: action.type, ref: action.ref || '', x: action.x, y: action.y, text: action.text, url: action.url, tab: action.tab, description: action.description || '' },
+      effect: { verified: null }
+    };
+  }
   if (action.type === 'navigate') {
     const url = new URL(action.url);
     if (!permitted(url.href) || url.username || url.password) throw new Error('Only HTTPS or local URLs are allowed.');
@@ -1231,6 +1245,23 @@ async function actOnTab(fresh, action, message) {
   }
   if (action.type === 'read') { const page = await readPage(fresh.id); return { title: page.title, text: page.text, effect: { verified: true } }; }
   if (action.type === 'wait') { const seconds = Number(action.seconds); if (!Number.isFinite(seconds) || seconds < 1 || seconds > 10) throw new Error('Invalid wait duration.'); await sleep(Math.round(seconds * 1000)); return { effect: { verified: null } }; }
+  if (action.type === 'waitFor') {
+    const wantText = String(action.text || '').toLowerCase();
+    const wantUrl = String(action.url || '').toLowerCase();
+    const seconds = Math.min(Math.max(Number(action.seconds) || 20, 1), 30);
+    const deadline = Date.now() + seconds * 1000;
+    let last = '';
+    while (Date.now() < deadline) {
+      const tab = await getTab(fresh.id).catch(() => null);
+      const page = await readPage(fresh.id).catch(() => ({ text: '' }));
+      last = String(page?.text || '');
+      const textHit = !wantText || last.toLowerCase().includes(wantText);
+      const urlHit = !wantUrl || String(tab?.url || '').toLowerCase().includes(wantUrl);
+      if (textHit && urlHit) return { found: true, waited: seconds - Math.max(0, Math.round((deadline - Date.now()) / 1000)), effect: { verified: true } };
+      await sleep(300);
+    }
+    return { found: false, effect: { verified: false }, note: 'That text never appeared within ' + seconds + 's.', page: last.slice(0, 1200) };
+  }
   const gate = await guardAction(fresh.id, action, message);
   if (action.type === 'fill') {
     const before = await signature(fresh.id);
@@ -1296,7 +1327,9 @@ async function actOnTab(fresh, action, message) {
       after = await settle(fresh.id, before);
       verified = Effect.of(before, after).verified;
     }
-    return { ...extra, fallback, effect: { verified }, code: Effect.code({ verified }), notice: gate?.notice };
+    const live = beforeState?.live ? (await watched(fresh.id))?.live : '';
+    const receipt = live && live !== beforeState.live ? live.slice(0, 160) : '';
+    return { ...extra, fallback, receipt, effect: { verified }, code: Effect.code({ verified }), notice: gate?.notice };
   } else throw new Error('Unknown action.');
   const after = await settle(fresh.id, before);
   const effect = Effect.of(before, after);
