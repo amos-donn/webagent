@@ -1010,6 +1010,44 @@ async function captureMediaAudio(session) {
   send({ event: 'start', duration, title: document.title, url: location.href });
   return { state: 'running', duration, paused: !!media.paused, title: document.title, url: location.href };
 }
+// Chrome can share a whole tab's audio, which covers the players the page path cannot: sound inside
+// an <iframe>, a player built on Web Audio, and the many streaming <video> elements whose
+// captureStream exposes no audio track at all. The capture needs an AudioContext, which a service
+// worker does not have, so it runs in an offscreen document and reports back through the same
+// transcribe-event channel the page uses.
+async function pageMediaTime(tabId) {
+  const [result] = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: () => {
+      const media = [...document.querySelectorAll('video,audio')]
+        .filter(el => el.currentSrc || el.duration > 0.5)
+        .sort((a, b) => (b.duration || 0) - (a.duration || 0))[0];
+      return Number(media?.currentTime) || 0;
+    }
+  }).catch(() => []);
+  return Number(result?.result) || 0;
+}
+
+async function offscreenReady() {
+  if (await chrome.offscreen.hasDocument?.()) return;
+  await chrome.offscreen.createDocument({
+    url: 'offscreen.html',
+    reasons: ['USER_MEDIA'],
+    justification: 'Capture the audio this tab is playing so it can be transcribed.'
+  });
+}
+
+async function tabAudioStart(tab, session) {
+  if (!chrome.tabCapture?.getMediaStreamId) throw new Error('This Chrome does not offer tab audio capture.');
+  const streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tab.id });
+  await offscreenReady();
+  // The transcript lines are timed against the media element, so the capture counts from the
+  // element's own clock rather than from zero.
+  const started = await chrome.runtime.sendMessage({ target: 'offscreen', type: 'tab-capture-start', session, streamId, startTime: await pageMediaTime(tab.id) });
+  if (!started?.ok) throw new Error(started?.error || "Chrome did not share this tab's audio.");
+  return { state: 'running', duration: 0, paused: false, title: tab.title || '', url: tab.url || '', via: 'tab' };
+}
+
 function stopCapture(session) {
   const capture = window.__mezzeCapture;
   if (capture && (!session || capture.session === session)) capture.stop();
@@ -1433,11 +1471,21 @@ async function handle(message) {
     // self-contained function because it runs inside the page.
     await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['audio.js'] });
     const [result] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: captureMediaAudio, args: [session] });
-    return result?.result || { state: 'none', error: 'The page did not answer.' };
+    const page = result?.result || { state: 'none', error: 'The page did not answer.' };
+    if (page.state === 'running') return page;
+    // A page with no media element, or one whose element exposes no audio track, is not a dead end:
+    // Chrome can hand over the tab's own audio instead.
+    try {
+      return await tabAudioStart(tab, session);
+    } catch (error) {
+      throw new Error([page.error, error?.message].filter(Boolean).join(' '));
+    }
   }
   if (message.type === 'capture-stop') {
     const tab = await getTab(message.tabId);
     await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: stopCapture, args: [String(message.session || '')] }).catch(() => {});
+    // The tab capture, if it is the one running, lives in the offscreen document.
+    await chrome.runtime.sendMessage({ target: 'offscreen', type: 'tab-capture-stop' }).catch(() => {});
     return { stopped: true };
   }
   if (message.type === 'player-open') {

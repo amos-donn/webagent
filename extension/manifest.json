@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "__MSG_extName__",
-  "version": "1.10.4",
+  "version": "1.10.5",
   "update_url": "https://github.com/amos-donn/webagent/releases/latest/download/updates.xml",
   "default_locale": "en",
   "description": "__MSG_extDesc__",
@@ -16,7 +16,9 @@
     "alarms",
     "notifications",
     "tabGroups",
-    "contextMenus"
+    "contextMenus",
+    "tabCapture",
+    "offscreen"
   ],
   "commands": {
     "_execute_action": {
